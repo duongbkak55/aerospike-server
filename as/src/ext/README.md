@@ -49,10 +49,19 @@ Cả hai biến thể đều ghi binary ra cùng một đường dẫn `target/.
 mỗi binary ra chỗ khác sau khi build, rồi mới chạy `p0_smoke.sh`.
 
 ```sh
-AEROSPIKE_TELEMETRY=FALSE make && cp target/Linux-x86_64/bin/asd /tmp/asd-ce
-AEROSPIKE_TELEMETRY=FALSE make USE_EXT=1 && cp target/Linux-x86_64/bin/asd /tmp/asd-ext
+make && cp target/Linux-x86_64/bin/asd /tmp/asd-ce
+make USE_EXT=1 && cp target/Linux-x86_64/bin/asd /tmp/asd-ext
 tools/ext-lab/p0_smoke.sh /tmp/asd-ce /tmp/asd-ext
 ```
 
-`AEROSPIKE_TELEMETRY=FALSE` để tắt telemetry: script `build/gen_version` gửi telemetry về
-Aerospike trong lúc build.
+## Build telemetry và tên sản phẩm
+
+- **Telemetry:** bản upstream của `build/gen_version` gửi một request về
+  `build.aerospike.com` mỗi lần build. Request mang theo version, edition, arch, OS và SHA
+  commit. Nhánh này đã đổi telemetry thành **opt-in**: chỉ gửi khi đặt
+  `AEROSPIKE_TELEMETRY` khác `FALSE`.
+- **Tên sản phẩm:** `make AS_BUILD_TYPE="Ten San Pham"` đổi chuỗi mà server báo ra trong
+  info `edition`, `build` và `version`, trong log và trong `asd --version`. Mặc định giữ
+  nguyên `Aerospike Community Edition`. Chỉ cho phép chữ, số, dấu cách và các ký tự
+  `. _ -`. **Lưu ý:** `asadm` và một số client có thể dựa vào chuỗi này, nên cần test lại
+  công cụ trước khi đổi.

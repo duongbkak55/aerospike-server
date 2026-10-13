@@ -18,6 +18,22 @@ và `asinfo` dùng được mà không phải sửa.
 | 3 | TLS | **Không làm.** | Cách ly bằng hạ tầng mạng (mạng riêng, VPN hoặc WireGuard giữa các DC) là điều kiện bắt buộc khi triển khai. Xem mục 6. |
 | 4 | Pháp lý (AGPL, EULA) | **Tạm chưa đánh giá. Owner quyết định trước.** | Trong lúc chờ, vẫn giữ nguyên tắc clean-room ở mục 2 để không tự đóng mất lựa chọn nào. Chưa phát hành binary ra ngoài. |
 
+### Chiến lược sản phẩm (đã chốt)
+
+kvbench cho thấy Aerospike vượt trội hẳn so với các lựa chọn khác. Vì vậy hướng đi là
+**tự phát triển trên Aerospike CE, theo cách Huawei làm với PostgreSQL**:
+
+- Coi đây là sản phẩm tách hẳn từ CE: chốt một bản gốc (8.1.2.5). Chỉ lấy những bản vá
+  upstream cần thiết (bảo mật, lỗi dữ liệu); không rebase theo mọi bản phát hành.
+- Vẫn giữ code mới trong `as/src/ext/` để việc lấy bản vá ít xung đột.
+- Chuẩn bị đổi thương hiệu:
+  - tên sản phẩm là tham số build `AS_BUILD_TYPE`;
+  - telemetry gửi về Aerospike chuyển sang **opt-in**.
+- Mỗi giai đoạn phải đo lại bằng kvbench so với CE gốc. Không được đánh mất lợi thế hiệu năng.
+- Phía owner làm song song: tra cứu bằng sáng chế của Aerospike ở thị trường mục tiêu, chốt
+  mô hình sử dụng (nội bộ, giao cho khách hay DBaaS) để biết có phát sinh nghĩa vụ AGPL
+  không, và xác nhận lý do Aerospike không bán ở thị trường đó.
+
 ---
 
 ## 1. Kết quả khảo sát base code
