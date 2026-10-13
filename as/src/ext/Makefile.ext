@@ -13,3 +13,17 @@ EXT_SOURCES += security_ext.c
 
 # bcrypt (libxcrypt) for the default admin password.
 LIBRARIES += -lcrypt
+
+# Durable deletes - tombstones (P2a).
+EXT_REPLACED_SOURCES += base/record_ce.c
+EXT_SOURCES += record_ext.c
+EXT_REPLACED_SOURCES += transaction/rw_utils_ce.c
+EXT_SOURCES += rw_utils_ext.c
+EXT_REPLACED_SOURCES += transaction/delete_ce.c
+EXT_SOURCES += delete_ext.c
+EXT_REPLACED_SOURCES += storage/drv_common_ce.c
+EXT_SOURCES += drv_common_ext.c
+EXT_REPLACED_SOURCES += storage/drv_ssd_ce.c
+EXT_SOURCES += drv_ssd_ext.c
+EXT_REPLACED_SOURCES += storage/drv_mem_ce.c
+EXT_SOURCES += drv_mem_ext.c

@@ -1,0 +1,409 @@
+/*
+ * rw_utils_ext.c
+ *
+ * Ext build - read/write hooks with durable delete (tombstone) support.
+ * Based on transaction/rw_utils_ce.c.
+ *
+ * Copyright (C) 2016-2024 Aerospike, Inc.
+ *
+ * Portions may be licensed to Aerospike, Inc. under one or more contributor
+ * license agreements.
+ *
+ * This program is free software: you can redistribute it and/or modify it under
+ * the terms of the GNU Affero General Public License as published by the Free
+ * Software Foundation, either version 3 of the License, or (at your option) any
+ * later version.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+ * FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+ * details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with this program.  If not, see http://www.gnu.org/licenses/
+ */
+
+//==========================================================
+// Includes.
+//
+
+#include "transaction/rw_utils.h"
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <string.h>
+
+#include "citrusleaf/alloc.h"
+
+#include "log.h"
+#include "msg.h"
+#include "vector.h"
+
+#include "base/datamodel.h"
+#include "base/index.h"
+#include "base/proto.h"
+#include "base/transaction.h"
+#include "storage/storage.h"
+#include "transaction/rw_request.h"
+
+//==========================================================
+// Public API.
+//
+
+// A durable delete becomes a write with a single delete-all op, so the write
+// path stores, replicates and indexes a tombstone (a record with no bins).
+// The message is in host byte order here.
+static cl_msg*
+make_durable_delete_write(const cl_msg* msgp)
+{
+	size_t old_sz = sizeof(as_proto) + msgp->proto.sz;
+	cl_msg* new_msgp = cf_malloc(old_sz + sizeof(as_msg_op));
+
+	memcpy(new_msgp, msgp, old_sz);
+
+	as_msg_op* op = (as_msg_op*)((uint8_t*)new_msgp + old_sz);
+
+	*op = (as_msg_op){ .op_sz = OP_FIXED_SZ, .op = AS_MSG_OP_DELETE_ALL };
+
+	new_msgp->proto.sz += sizeof(as_msg_op);
+	new_msgp->msg.n_ops++;
+	new_msgp->msg.info2 &= ~AS_MSG_INFO2_DELETE;
+
+	// Tombstones don't expire - also avoids TTL checks (e.g. ttl disallowed
+	// with nsup-period 0) rejecting the delete.
+	new_msgp->msg.record_ttl = TTL_NEVER_EXPIRE;
+
+	return new_msgp;
+}
+
+bool
+convert_to_write(as_transaction* tr, cl_msg** p_msgp)
+{
+	// Shared messages (batch) were converted by convert_batched_to_write().
+	if (! as_transaction_is_durable_delete(tr) || SHARED_MSGP(tr)) {
+		return false;
+	}
+
+	cl_msg* new_msgp = make_durable_delete_write(tr->msgp);
+
+	cf_free(tr->msgp);
+	tr->msgp = new_msgp;
+	*p_msgp = new_msgp;
+
+	return true;
+}
+
+// Batch sub-transaction messages live in the batch buffer - converted copies
+// are owned by the batch, and freed by destroy_batch_extra_msgps().
+void
+convert_batched_to_write(const as_namespace* ns, as_transaction* tr,
+		void** p_extra_msgps)
+{
+	if (! as_transaction_is_durable_delete(tr)) {
+		return;
+	}
+
+	if (*p_extra_msgps == NULL) {
+		*p_extra_msgps = cf_vector_create(sizeof(cl_msg*), 8, 0);
+	}
+
+	cl_msg* new_msgp = make_durable_delete_write(tr->msgp);
+
+	cf_vector_append_ptr((cf_vector*)*p_extra_msgps, new_msgp);
+	tr->msgp = new_msgp;
+}
+
+void
+destroy_batch_extra_msgps(void* extra_msgps)
+{
+	cf_vector* v = (cf_vector*)extra_msgps;
+
+	if (v == NULL) {
+		return;
+	}
+
+	for (uint32_t i = 0; i < cf_vector_size(v); i++) {
+		cf_free(cf_vector_get_ptr(v, i));
+	}
+
+	cf_vector_destroy(v);
+}
+
+int
+validate_delete_durability(as_transaction* tr)
+{
+	return AS_OK;
+}
+
+int
+repl_state_check(as_record* r, as_transaction* tr)
+{
+	return 0;
+}
+
+void
+will_replicate(as_record* r, as_namespace* ns)
+{
+}
+
+bool
+write_is_full_drop(const as_transaction* tr)
+{
+	return IS_DROP(tr);
+}
+
+bool
+sufficient_replica_destinations(const as_namespace* ns, uint32_t n_dests)
+{
+	return true;
+}
+
+bool
+set_replica_destinations(as_transaction* tr, rw_request* rw)
+{
+	rw->n_dest_nodes = as_partition_get_other_replicas(tr->rsv.p, rw->dest_nodes);
+
+	return true;
+}
+
+void
+finished_replicated(as_transaction* tr)
+{
+}
+
+void
+finished_not_replicated(rw_request* rw)
+{
+}
+
+bool
+generation_check(const as_record* r, const as_msg* m, const as_namespace* ns)
+{
+	if ((m->info2 & AS_MSG_INFO2_GENERATION) != 0) {
+		return m->generation == r->generation;
+	}
+
+	if ((m->info2 & AS_MSG_INFO2_GENERATION_GT) != 0) {
+		return m->generation > r->generation;
+	}
+
+	return true; // no generation requirement
+}
+
+bool
+forbid_replace(const as_namespace* ns)
+{
+	return false;
+}
+
+void
+prepare_bin_metadata(const as_transaction* tr, as_storage_rd* rd)
+{
+	as_record* r = rd->r;
+
+	rd->bin_luts = false; // no usage with independent LUTs yet
+
+	if (rd->bin_luts) {
+		for (uint32_t i = 0; i < rd->n_bins; i++) {
+			as_bin* b = &rd->bins[i];
+
+			// Preserve LUT shared with record in case bin is not written.
+			if (b->lut == 0) {
+				b->lut = r->last_update_time;
+			}
+		}
+
+		return;
+	}
+
+	// Remove all metadata.
+	for (uint32_t i = 0; i < rd->n_bins; i++) {
+		rd->bins[i].lut = 0;
+	}
+}
+
+void
+unwind_index_metadata(const as_record* old_r, as_record* r)
+{
+	r->void_time = old_r->void_time;
+	r->last_update_time = old_r->last_update_time;
+	r->generation = old_r->generation;
+	r->tombstone = old_r->tombstone;
+}
+
+void
+set_xdr_write(const as_transaction* tr, as_record* r)
+{
+}
+
+void
+touch_bin_metadata(as_storage_rd* rd)
+{
+	if (rd->bin_luts) { // no usage with independent LUTs yet
+		for (uint32_t i = 0; i < rd->n_bins; i++) {
+			rd->bins[i].lut = 0;
+		}
+	}
+}
+
+// Called before the record is written to storage. A durable delete leaves a
+// non-expiring tombstone - any other write makes the record live again.
+void
+transition_delete_metadata(as_transaction* tr, as_record* r, bool is_delete,
+		bool is_bin_cemetery)
+{
+	if (! is_delete) {
+		r->tombstone = 0;
+		return;
+	}
+
+	if (as_transaction_is_durable_delete(tr)) {
+		r->tombstone = 1;
+		r->void_time = 0;
+	}
+}
+
+bool
+forbid_resolve(const as_transaction* tr, const as_storage_rd* rd, uint64_t msg_lut)
+{
+	return false;
+}
+
+bool
+resolve_bin(as_storage_rd* rd, const as_msg_op* op, uint64_t msg_lut,
+		uint16_t n_ops, uint16_t* n_won, int* result)
+{
+	return true;
+}
+
+bool
+udf_resolve_bin(as_storage_rd* rd, const char* name)
+{
+	return true;
+}
+
+void
+delete_bin(as_storage_rd* rd, const as_msg_op* op, uint64_t msg_lut)
+{
+	as_bin_delete_w_len(rd, op->name, op->name_sz);
+}
+
+void
+udf_delete_bin(as_storage_rd* rd, const char* name)
+{
+	as_bin_delete(rd, name);
+}
+
+void
+write_resolved_bin(as_storage_rd* rd, const as_msg_op* op, uint64_t msg_lut,
+		as_bin* b)
+{
+}
+
+// Caller has already handled destroying all bins' particles.
+void
+delete_all_bins(as_storage_rd* rd)
+{
+	rd->n_bins = 0;
+}
+
+//==========================================================
+// Private API - for enterprise separation only.
+//
+
+// Tombstones stay in the index - other deletes drop the record.
+void
+write_delete_record(as_record* r, as_index_tree* tree)
+{
+	if (r->tombstone == 0) {
+		as_index_delete(tree, &r->keyd);
+	}
+}
+
+uint32_t
+dup_res_pack_repl_state_info(const as_record* r, const as_namespace* ns)
+{
+	return 0;
+}
+
+bool
+dup_res_should_retry_transaction(rw_request* rw, uint32_t result_code)
+{
+	return false;
+}
+
+void
+dup_res_handle_tie(rw_request* rw, const msg* m, uint32_t result_code)
+{
+}
+
+void
+apply_if_tie(rw_request* rw)
+{
+}
+
+void
+dup_res_translate_result_code(rw_request* rw)
+{
+	rw->result_code = AS_OK;
+}
+
+void
+dup_res_init_repl_state(as_remote_record* rr, uint32_t info)
+{
+}
+
+void
+repl_write_add_regime(msg* m, const as_transaction* tr)
+{
+}
+
+void
+repl_write_init_repl_state(as_remote_record* rr, bool from_replica)
+{
+}
+
+conflict_resolution_pol
+repl_write_conflict_resolution_policy(const as_namespace* ns)
+{
+	return AS_NAMESPACE_CONFLICT_RESOLUTION_POLICY_LAST_UPDATE_TIME;
+}
+
+bool
+repl_write_should_retransmit_replicas(rw_request* rw, uint32_t result_code)
+{
+	switch (result_code) {
+	case AS_ERR_CLUSTER_KEY_MISMATCH:
+		rw->xmit_ms = 0; // force retransmit on next cycle
+		return true;
+	default:
+		return false;
+	}
+}
+
+void
+repl_write_with_orig(rw_request* rw)
+{
+}
+
+void
+repl_write_send_confirmation(rw_request* rw)
+{
+}
+
+void
+repl_write_handle_confirmation(msg* m)
+{
+}
+
+int
+record_replace_check(as_record* r, as_namespace* ns)
+{
+	return 0;
+}
+
+void
+record_replaced(as_record* r, as_remote_record* rr)
+{
+}

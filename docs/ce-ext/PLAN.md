@@ -416,4 +416,9 @@ song. P3b phụ thuộc P2a vì dùng chung cơ chế tombstone.
    Còn lại:
    - P1b: quota, allowlist, giới hạn tần suất login sai.
    - Kiểm tra `asadm` và `aql`.
-4. Tiếp theo: P2a (Tombstone).
+4. **P2a – Durable delete và tombstone đã cài đặt** (xem `TOMBSTONE.md`):
+   - Tombstone được ghi xuống storage, replicate và migrate, nạp lại khi cold start, có bộ
+     đếm ở mức namespace, set và partition.
+   - Đã test hai kịch bản zombie: cold restart, và node cũ vào lại cluster.
+   - Core không phải sửa.
+5. Tiếp theo: P2b (tomb raider), vì hiện tombstone không bao giờ được dọn.

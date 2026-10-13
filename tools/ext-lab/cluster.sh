@@ -4,9 +4,15 @@
 # 127.0.0.1 with distinct ports (no Docker needed).
 #
 # Usage:
-#   cluster.sh start [-n nodes] [-c cluster-index] [-a asd] [-x extra.conf]
-#   cluster.sh stop  [-c cluster-index]
-#   cluster.sh wait  [-n nodes] [-c cluster-index] [-t seconds]
+#   cluster.sh start      [-n nodes] [-c cluster-index] [-a asd] [-x extra.conf]
+#                         [-s memory|file]
+#   cluster.sh stop       [-c cluster-index]
+#   cluster.sh wait       [-n nodes] [-c cluster-index] [-t seconds]
+#   cluster.sh start-node -i node [-n nodes] [-c ...] [-a ...] [-x ...] [-s ...]
+#   cluster.sh stop-node  -i node [-c cluster-index]
+#
+# '-s file' stores namespace 'test' in a file (cold start reloads it) instead of
+# memory only. Nodes restarted with start-node keep their data.
 #
 # Node i (0-based) of cluster c listens on service port 3000 + 100*c + 10*i,
 # fabric +1 and heartbeat +2. Two clusters (c=0, c=1) can run side by side for
@@ -30,14 +36,18 @@ cluster=0
 asd="$REPO_DIR/target/Linux-$(uname -m)/bin/asd"
 extra=""
 timeout_s=30
+storage=memory
+node=""
 
-while getopts "n:c:a:x:t:" opt; do
+while getopts "n:c:a:x:t:s:i:" opt; do
 	case "$opt" in
 	n) nodes="$OPTARG" ;;
 	c) cluster="$OPTARG" ;;
 	a) asd="$OPTARG" ;;
 	x) extra="$OPTARG" ;;
 	t) timeout_s="$OPTARG" ;;
+	s) storage="$OPTARG" ;;
+	i) node="$OPTARG" ;;
 	*) exit 2 ;;
 	esac
 done
@@ -48,6 +58,15 @@ base_port() {
 
 node_dir() {
 	echo "$LAB_DIR/c$cluster/n$1"
+}
+
+storage_conf() {
+	if [[ "$storage" == file ]]; then
+		printf '\tstorage-engine device {\n\t\tfile %s/data/test.dat\n\t\tfilesize 256M\n\t\tflush-max-ms 10\n\t}' \
+			"$1"
+	else
+		printf '\tstorage-engine memory {\n\t\tdata-size 1G\n\t}'
+	fi
 }
 
 write_conf() {
@@ -104,9 +123,7 @@ $seeds		interval 150
 namespace test {
 	replication-factor 2
 
-	storage-engine memory {
-		data-size 1G
-	}
+$(storage_conf "$dir")
 }
 EOF
 
@@ -115,39 +132,48 @@ EOF
 	fi
 }
 
+start_node() {
+	local i="$1" dir
+	dir="$(node_dir "$i")"
+	mkdir -p "$dir/work/usr/udf/lua" "$dir/work/smd" "$dir/log" "$dir/data"
+	write_conf "$i"
+
+	"$asd" --foreground --config-file "$dir/aerospike.conf" \
+		>> "$dir/log/console.log" 2>&1 &
+	echo $! > "$dir/asd.pid"
+	echo "node $i: pid $(cat "$dir/asd.pid") port $(base_port "$i")"
+}
+
 start() {
 	[[ -x "$asd" ]] || { echo "asd not found: $asd" >&2; exit 1; }
 
 	for ((i = 0; i < nodes; i++)); do
-		local dir
-		dir="$(node_dir "$i")"
-		mkdir -p "$dir/work/usr/udf/lua" "$dir/work/smd" "$dir/log"
-		write_conf "$i"
-
-		"$asd" --foreground --config-file "$dir/aerospike.conf" \
-			> "$dir/log/console.log" 2>&1 &
-		echo $! > "$dir/asd.pid"
-		echo "node $i: pid $(cat "$dir/asd.pid") port $(base_port "$i")"
+		start_node "$i"
 	done
+}
+
+# Graceful stop (SIGTERM, which flushes storage), SIGKILL after 10s.
+stop_pid_file() {
+	local pid_file="$1" pid
+	pid="$(cat "$pid_file")"
+
+	if kill "$pid" 2>/dev/null; then
+		for _ in $(seq 50); do
+			kill -0 "$pid" 2>/dev/null || break
+			sleep 0.2
+		done
+
+		kill -9 "$pid" 2>/dev/null || true
+	fi
+
+	rm -f "$pid_file"
 }
 
 stop() {
 	shopt -s nullglob
 
 	for pid_file in "$LAB_DIR/c$cluster"/n*/asd.pid; do
-		local pid
-		pid="$(cat "$pid_file")"
-
-		if kill "$pid" 2>/dev/null; then
-			for _ in $(seq 50); do
-				kill -0 "$pid" 2>/dev/null || break
-				sleep 0.2
-			done
-
-			kill -9 "$pid" 2>/dev/null || true
-		fi
-
-		rm -f "$pid_file"
+		stop_pid_file "$pid_file"
 	done
 }
 
@@ -182,8 +208,15 @@ case "$cmd" in
 start) start ;;
 stop) stop ;;
 wait) wait_cluster ;;
+start-node) start_node "${node:?-i required}" ;;
+stop-node)
+	pid_file="$(node_dir "${node:?-i required}")/asd.pid"
+	if [[ -f "$pid_file" ]]; then
+		stop_pid_file "$pid_file"
+	fi
+	;;
 *)
-	sed -n '3,17p' "$0"
+	sed -n '3,22p' "$0"
 	exit 2
 	;;
 esac
