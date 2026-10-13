@@ -11,8 +11,12 @@
  * shipped on unless the DC namespace has 'forward' set, which prevents loops
  * in active-active setups.
  *
- * Not yet (P3b/P3c): bin convergence, recovery after queue overflow or
- * restart, destination partition map, compression, TLS, filters.
+ * With ship-bin-luts (bin convergence) every bin ships with its LUT and the
+ * writing cluster's src-id, bin tombstones ship as bin deletes, and the
+ * destination merges bin by bin instead of replacing the record.
+ *
+ * Not yet (P3c): recovery after queue overflow or restart, destination
+ * partition map, compression, TLS, filters.
  *
  * This program is free software: you can redistribute it and/or modify it under
  * the terms of the GNU Affero General Public License as published by the Free
@@ -598,8 +602,26 @@ link_dc(xdr_dc* dc)
 					ns_cfg->ns_name);
 		}
 
-		if (ns_cfg->bin_policy != XDR_BIN_POLICY_ALL || ns_cfg->ship_bin_luts) {
-			cf_crash_nostack(AS_XDR, "DC %s {%s}: only bin-policy all is supported yet (P3b)",
+		if (ns_cfg->bin_policy != XDR_BIN_POLICY_ALL &&
+				ns_cfg->bin_policy != XDR_BIN_POLICY_ONLY_CHANGED) {
+			cf_crash_nostack(AS_XDR, "DC %s {%s}: only bin-policy all or only-changed is supported",
+					cfg->name, ns->name);
+		}
+
+		// Bin convergence - the destination resolves each bin by LUT and
+		// src-id, so both must ship, and src-ids must tell clusters apart.
+		if (ns->conflict_resolve_writes && ! ns_cfg->ship_bin_luts) {
+			cf_crash_nostack(AS_XDR, "DC %s {%s}: conflict-resolve-writes needs ship-bin-luts true",
+					cfg->name, ns->name);
+		}
+
+		if (ns_cfg->ship_bin_luts && ! ns->conflict_resolve_writes) {
+			cf_crash_nostack(AS_XDR, "DC %s {%s}: ship-bin-luts needs conflict-resolve-writes true",
+					cfg->name, ns->name);
+		}
+
+		if (ns_cfg->ship_bin_luts && g_config.xdr_cfg.src_id == 0) {
+			cf_crash_nostack(AS_XDR, "DC %s {%s}: ship-bin-luts needs a unique xdr src-id",
 					cfg->name, ns->name);
 		}
 
@@ -616,9 +638,10 @@ link_dc(xdr_dc* dc)
 
 		cfg->ns_cfgs[ns->ix] = ns_cfg;
 
-		cf_info(AS_XDR, "DC %s {%s}: shipping to namespace %s%s", cfg->name,
+		cf_info(AS_XDR, "DC %s {%s}: shipping to namespace %s%s%s", cfg->name,
 				ns->name, ns_cfg->remote_namespace != NULL ?
 						ns_cfg->remote_namespace : ns->name,
+				ns_cfg->ship_bin_luts ? " (bin LUTs)" : "",
 				ns_cfg->forward ? " (forward)" : "");
 	}
 
@@ -811,6 +834,8 @@ build_ship_msg(const as_namespace* ns, const as_xdr_dc_ns_cfg* ns_cfg,
 
 	as_record* r = r_ref.r;
 	bool is_tombstone = ! as_record_is_live(r);
+	bool is_binless = as_record_is_binless(r); // bin cemeteries have bins
+	bool ship_luts = ns_cfg->ship_bin_luts;
 	uint32_t now_s = as_record_void_time_get();
 
 	if (! is_tombstone && r->void_time != 0 && r->void_time <= now_s) {
@@ -826,7 +851,7 @@ build_ship_msg(const as_namespace* ns, const as_xdr_dc_ns_cfg* ns_cfg,
 	as_bin stack_bins[RECORD_MAX_BINS];
 	uint16_t n_bins = 0;
 
-	if (! is_tombstone) {
+	if (! is_binless) {
 		if (as_storage_rd_load_bins(&rd, stack_bins) < 0) {
 			cf_warning(AS_XDR, "{%s} failed to load bins of %pD", ns->name,
 					keyd);
@@ -851,11 +876,15 @@ build_ship_msg(const as_namespace* ns, const as_xdr_dc_ns_cfg* ns_cfg,
 	uint16_t n_fields = 3 + (set_name != NULL ? 1 : 0) + (has_key ? 1 : 0);
 	uint16_t n_ops = 0;
 
+	// With bin LUTs, bin tombstones ship too - as bin deletes.
 	for (uint16_t i = 0; i < n_bins; i++) {
-		if (as_bin_is_live(&rd.bins[i])) {
+		if (ship_luts || as_bin_is_live(&rd.bins[i])) {
 			n_ops++;
 		}
 	}
+
+	// A tombstone with no bins left to carry LUTs ships as a durable delete.
+	bool ship_delete = is_tombstone && n_ops == 0;
 
 	as_msg m = {
 			.header_sz = sizeof(as_msg),
@@ -866,11 +895,15 @@ build_ship_msg(const as_namespace* ns, const as_xdr_dc_ns_cfg* ns_cfg,
 			.n_ops = n_ops
 	};
 
-	if (is_tombstone) {
+	if (ship_delete) {
 		m.info2 |= AS_MSG_INFO2_DELETE | AS_MSG_INFO2_DURABLE_DELETE;
 	}
 	else {
-		m.info3 = AS_MSG_INFO3_CREATE_OR_REPLACE;
+		// With bin LUTs the destination merges bin by bin - no replace.
+		if (! ship_luts) {
+			m.info3 = AS_MSG_INFO3_CREATE_OR_REPLACE;
+		}
+
 		m.record_ttl = r->void_time == 0 ? TTL_NEVER_EXPIRE :
 				r->void_time - now_s;
 	}
@@ -892,33 +925,51 @@ build_ship_msg(const as_namespace* ns, const as_xdr_dc_ns_cfg* ns_cfg,
 		append_field(db, AS_MSG_FIELD_TYPE_KEY, rd.key, rd.key_size);
 	}
 
-	uint64_t lut_be = cf_swap_to_be64(r->last_update_time);
+	uint8_t src_id = g_config.xdr_cfg.src_id;
+	uint64_t lut = ship_luts ?
+			ext_xdr_pack_lut(r->last_update_time, src_id) :
+			r->last_update_time;
+	uint64_t lut_be = cf_swap_to_be64(lut);
 
 	append_field(db, AS_MSG_FIELD_TYPE_LUT, &lut_be, sizeof(lut_be));
 
 	for (uint16_t i = 0; i < n_bins; i++) {
 		as_bin* b = &rd.bins[i];
 
-		if (! as_bin_is_live(b)) {
+		if (! ship_luts && ! as_bin_is_live(b)) {
 			continue;
 		}
 
 		size_t name_sz = strlen(b->name);
+		size_t lut_sz = ship_luts ? sizeof(uint64_t) : 0;
 		uint32_t value_sz = as_bin_particle_client_value_size(b);
 		uint8_t* at;
 
-		cf_dyn_buf_reserve(db, sizeof(as_msg_op) + name_sz + value_sz, &at);
+		cf_dyn_buf_reserve(db, sizeof(as_msg_op) + name_sz + lut_sz + value_sz,
+				&at);
 
 		as_msg_op* op = (as_msg_op*)at;
 
 		*op = (as_msg_op){
-				.op_sz = (uint32_t)(OP_FIXED_SZ + name_sz),
+				.op_sz = (uint32_t)(OP_FIXED_SZ + name_sz + lut_sz),
 				.op = AS_MSG_OP_WRITE,
+				.has_lut = ship_luts ? 1 : 0,
 				.name_sz = (uint8_t)name_sz
 		};
 
 		memcpy(op->name, b->name, name_sz);
-		as_bin_particle_to_client(b, op);
+
+		if (ship_luts) {
+			// LUT 0 and src-id 0 mean "same as the record" and "this cluster".
+			uint64_t bin_lut = ext_xdr_pack_lut(
+					b->lut != 0 ? b->lut : r->last_update_time,
+					b->src_id != 0 ? b->src_id : src_id);
+			uint64_t bin_lut_be = cf_swap_to_be64(bin_lut);
+
+			memcpy(op->name + name_sz, &bin_lut_be, sizeof(bin_lut_be));
+		}
+
+		as_bin_particle_to_client(b, op); // tombstone -> NULL (bin delete)
 		op->op_sz = cf_swap_to_be32(op->op_sz);
 	}
 

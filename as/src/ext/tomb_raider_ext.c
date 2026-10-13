@@ -129,7 +129,11 @@ ext_tomb_raider_check_flat(as_namespace* ns, const as_flat_record* flat)
 	if (as_record_get(rsv.tree, &flat->keyd, &r_ref) == 0) {
 		as_record* r = r_ref.r;
 
-		if (r->tombstone == 1 && r->cenotaph == 1) {
+		// A bin cemetery's current copy has bins too - it isn't older.
+		bool is_current = flat->generation == r->generation &&
+				flat->last_update_time == r->last_update_time;
+
+		if (r->tombstone == 1 && r->cenotaph == 1 && ! is_current) {
 			r->cenotaph = 0;
 		}
 

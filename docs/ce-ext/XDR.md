@@ -1,8 +1,11 @@
-# XDR (P3a) – bản build `USE_EXT=1`
+# XDR (P3a, P3b) – bản build `USE_EXT=1`
 
-Kế hoạch tổng xem `PLAN.md`. Đây là giai đoạn **P3a**: ship dữ liệu giữa các cluster, chạy
-được active-active. Phần hội tụ theo bin (P3b) và phục hồi bền vững (P3c) chưa có, xem
-[Hạn chế hiện tại](#hạn-chế-hiện-tại).
+Kế hoạch tổng xem `PLAN.md`. Tài liệu này gồm hai giai đoạn:
+- **P3a:** ship dữ liệu giữa các cluster, chạy được active-active.
+- **P3b:** hội tụ theo bin (bin convergence). Hai DC cùng ghi một key vẫn cho ra cùng một
+  kết quả ở cả hai bên. Xem mục [Hội tụ theo bin (P3b)](#hội-tụ-theo-bin-p3b).
+
+Phần phục hồi bền vững (P3c) chưa có, xem [Hạn chế hiện tại](#hạn-chế-hiện-tại).
 
 ## Cấu hình
 
@@ -38,7 +41,8 @@ File mật khẩu chứa mật khẩu dạng rõ, nên đặt quyền `0600`.
 | `namespace` → `ship-only-specified-sets`, `ship-set`, `ignore-set` | Có |
 | `namespace` → `transaction-queue-limit` | Có (mặc định 16K, chia đều cho 4 worker) |
 | `tls-name`, `connector`, `auth-mode external/pki` | **Không**: server từ chối khởi động |
-| `bin-policy` khác `all`, `ship-bin-luts` | **Không** (P3b): server từ chối khởi động |
+| `namespace` → `ship-bin-luts` | Có (P3b), xem mục hội tụ theo bin |
+| `namespace` → `bin-policy` | `all`, `only-changed` (hiện ship mọi bin, kể cả với `only-changed`). Giá trị khác: server từ chối khởi động |
 | `compression`, `ship-bin`, `ignore-bin` | **Không**: server từ chối khởi động |
 | Các option khác (`delay-ms`, `max-throughput`, `hot-key-ms`, `ship-nsup-deletes`…) | Được nhận nhưng chưa có tác dụng |
 | Đổi config DC lúc đang chạy (`set-config:context=xdr`) | Chưa hỗ trợ |
@@ -70,6 +74,86 @@ File mật khẩu chứa mật khẩu dạng rõ, nên đặt quyền `0600`.
     ghi log cảnh báo.
   - Queue đầy: bỏ write mới, tăng `abandoned`.
 
+## Hội tụ theo bin (P3b)
+
+**Khi nào cần:** khi cả hai DC có thể ghi cùng một key. Không bật thì bản ship đến sau đè
+cả record, nên hai DC có thể lệch nhau.
+
+**Cấu hình** (bật ở **mọi** cluster tham gia):
+
+```
+namespace test {
+	conflict-resolve-writes true
+	...
+}
+
+xdr {
+	src-id 1              # duy nhất cho mỗi cluster, từ 1 đến 255
+	dc DC_B {
+		node-address-port 10.0.2.1 3000
+		namespace test {
+			ship-bin-luts true
+		}
+	}
+}
+```
+
+Server từ chối khởi động nếu:
+- Namespace có `conflict-resolve-writes` mà DC không bật `ship-bin-luts`, hoặc ngược lại.
+- Bật `ship-bin-luts` mà chưa đặt `src-id`.
+
+**Quy tắc:** mỗi bin là một thanh ghi "ghi sau thắng" (last-writer-wins).
+- Mỗi bin lưu LUT (thời điểm ghi) và `src-id` (cluster đã ghi).
+- Khi nhận write qua XDR, server so từng bin với bản đang có. LUT lớn hơn thì thắng. LUT
+  bằng nhau thì `src-id` lớn hơn thắng.
+- Bin thua bị bỏ qua. Nếu mọi bin đều thua thì đích trả `LOST_CONFLICT`, phía ship coi là
+  thành công.
+- Write ship qua XDR là **cập nhật**, không thay thế record. Bin chỉ có ở đích vẫn được
+  giữ.
+
+**Xoá:**
+- Xoá một bin để lại **bin tombstone** mang LUT của lần xoá. Bản ship cũ hơn đến sau sẽ
+  không làm bin sống lại.
+- Xoá cả record (kể cả delete thường, vì delete thường được tự đổi thành durable delete)
+  biến mọi bin đang có thành bin tombstone. Record không còn bin sống gọi là **bin
+  cemetery**: đọc trả `not found`, được đếm vào stat `tombstones` và `xdr_bin_cemeteries`.
+- Ghi bin mới lên một bin cemetery làm record sống lại. Các bin đã xoá vẫn ở trạng thái đã
+  xoá.
+- **Xoá chỉ áp dụng cho dữ liệu mà DC đó đã thấy.** Ví dụ DC A xoá một record mà A chưa
+  nhận được, trong khi DC B vừa tạo record đó: A trả `not found` và không để lại gì. Record
+  của B được giữ ở cả hai bên.
+
+**Dọn dẹp:**
+- Bin tombstone cũ hơn `xdr-bin-tombstone-ttl` (mặc định 1 ngày) bị bỏ ở lần ghi kế tiếp
+  vào record đó.
+- Bin cemetery được tomb raider xoá như tombstone thường (`tomb-raider-eligible-age`, xem
+  `TOMBSTONE.md`).
+- `xdr-tomb-raider-period` và `xdr-tomb-raider-threads` được nhận để tương thích config
+  nhưng không có tác dụng.
+- **Cả hai TTL phải lớn hơn độ trễ ship tối đa,** kể cả lúc DC bị cắt mạng. Nếu không, bản
+  cũ đến sau khi tombstone đã bị dọn có thể làm dữ liệu sống lại.
+
+**Giờ hệ thống:**
+- LUT là đồng hồ ms của từng node, nên **các DC phải đồng bộ giờ** (NTP/chrony).
+- Nếu bản ghi nhận qua XDR có LUT "ở tương lai" do giờ lệch, LUT của record được đẩy lên
+  theo. Write cục bộ sau đó vẫn luôn mới hơn mọi bin mà nó ghi đè (LUT tăng ít nhất 1 ms).
+- Khi giờ hai DC lệch nhau, hai write gần nhau có thể được xếp sai thứ tự. Hai bên vẫn hội
+  tụ về cùng một kết quả.
+
+**Ngữ nghĩa cần biết:**
+- Increment, thao tác CDT (list/map) và UDF chạy đồng thời ở hai DC **không cộng dồn**:
+  giá trị của một bên sẽ thắng nguyên bin.
+- Không cho phép write kiểu replace (`REPLACE`, `CREATE_OR_REPLACE`) trên namespace bật
+  `conflict-resolve-writes`: server trả lỗi parameter.
+- Không nên bật `default-read-touch-ttl-pct` cùng `conflict-resolve-writes`.
+
+**Chi phí:**
+- Mỗi bin tốn thêm tối đa 6 byte trên storage (LUT và `src-id`).
+- Bin tombstone và bin cemetery chiếm chỗ cho tới khi được dọn.
+- Mỗi lần ship gửi toàn bộ bin kèm LUT, kể cả bin tombstone. Ship chỉ bin đã đổi thuộc
+  P3c.
+- `conflict-resolve-writes` chỉ đặt được trong file config, chưa đổi được lúc đang chạy.
+
 ## Thống kê
 
 Lệnh `asinfo -v 'get-stats:context=xdr;dc=DC_B'` trả về:
@@ -99,6 +183,11 @@ namespace và chế độ auth. Ticker in mỗi DC một dòng mỗi 10 giây.
 | `record_ext.c` | (đã có) | `replace_index_metadata` lấy `xdr-write` từ bản ghi replica/migrate. |
 | `drv_ssd_ext.c`, `drv_mem_ext.c` | (đã có) | Cold start nạp lại `xdr-write`. |
 | `delete_ext.c` | (đã có) | Delete thường trên master thì submit sang XDR. |
+| `bin_ext.c` | `base/bin_ce.c` | P3b: trạng thái bin tombstone, dọn bin tombstone quá hạn, nhận diện bin cemetery. |
+| `rw_utils_ext.c` | (đã có) | P3b: `resolve_bin` so LUT và `src-id` theo bin, `write_resolved_bin` / `delete_bin` / `delete_all_bins` ghi metadata và tạo bin tombstone, cấm replace, đổi delete thường thành durable delete. |
+| `record_ext.c` | (đã có) | P3b: LUT của record tăng đơn điệu, nhận diện bin cemetery ở replica, set index và stat. |
+| `flat_ext.c`, `drv_common_ext.c`, `tomb_raider_ext.c` | (đã có) | P3b: lưu `src-id` và cờ `xdr-write` của bin, cờ bin cemetery; nạp lại khi cold start; tomb raider dọn bin cemetery. |
+| `xdr_ext.c` | (đã có) | P3b: với `ship-bin-luts`, ship mọi bin (bin tombstone thành op xoá bin) kèm LUT và `src-id` (byte cao của LUT), không replace. |
 
 Core **không phải sửa**. Phía đích dùng đường ghi XDR sẵn có của core (cờ `INFO1_XDR`,
 field LUT).
@@ -109,12 +198,9 @@ gốc trên dữ liệu đã nhận qua XDR. Bản EE thì dùng đúng định 
 
 ## Hạn chế hiện tại
 
-- **Xung đột khi hai DC cùng ghi một key:** nếu cùng một key được ghi ở cả hai DC trong
-  khoảng thời gian nhỏ hơn độ trễ ship, mỗi bên có thể giữ bản của bên kia. Hai DC lệch
-  nhau cho tới lần ghi kế tiếp vào key đó.
-  - P3a an toàn khi mỗi key chỉ được ghi ở một DC tại một thời điểm, ví dụ chia key theo
-    vùng hoặc theo người dùng.
-  - P3b sẽ giải quyết bằng LUT theo bin (bin convergence, `conflict-resolve-writes`).
+- **Xung đột khi hai DC cùng ghi một key:** chỉ an toàn khi bật hội tụ theo bin (P3b).
+  Không bật thì nếu một key được ghi ở cả hai DC trong khoảng thời gian nhỏ hơn độ trễ
+  ship, mỗi bên có thể giữ bản của bên kia.
 - **Không bền qua sự cố:**
   - Queue nằm trong RAM. Write còn trong queue sẽ mất khi node nguồn restart.
   - Master đổi do migrate trước khi kịp ship cũng làm mất write.

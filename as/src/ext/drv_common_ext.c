@@ -81,15 +81,33 @@ drv_cold_start_remove_from_set_index(as_namespace* ns, as_index_tree* tree,
 	as_set_index_delete_live(ns, tree, r_ref->r, r_ref->r_h);
 }
 
-// A flat record with no bins is a tombstone - indexed, but not in the set
-// index. The caller has already assigned the set-id.
+// A flat record with no bins, or only bin tombstones (a bin cemetery), is a
+// tombstone.
+static bool
+flat_is_tombstone(const as_flat_opt_meta* opt_meta)
+{
+	return opt_meta->n_bins == 0 || opt_meta->extra_flags.xdr_bin_cemetery == 1;
+}
+
+static void
+set_cemetery(as_namespace* ns, as_index* r, bool is_cemetery)
+{
+	if ((r->xdr_bin_cemetery == 1) != is_cemetery) {
+		r->xdr_bin_cemetery = is_cemetery ? 1 : 0;
+		as_add_uint64(&ns->n_xdr_bin_cemeteries, is_cemetery ? 1 : -1);
+	}
+}
+
+// A tombstone is indexed, but not in the set index. The caller has already
+// assigned the set-id.
 void
 drv_cold_start_record_create(as_namespace* ns, const as_flat_record* flat,
 		const as_flat_opt_meta* opt_meta, as_index_tree* tree,
 		as_index_ref* r_ref)
 {
-	if (opt_meta->n_bins == 0) {
+	if (flat_is_tombstone(opt_meta)) {
 		ext_record_set_tombstone(r_ref->r, ns, true);
+		set_cemetery(ns, r_ref->r, opt_meta->n_bins != 0);
 		r_ref->r->cenotaph = 1; // no older copy seen yet
 		return;
 	}
@@ -105,7 +123,9 @@ drv_cold_start_transition_tombstone(as_namespace* ns,
 		as_index_ref* r_ref)
 {
 	as_index* r = r_ref->r;
-	bool is_tombstone = opt_meta->n_bins == 0;
+	bool is_tombstone = flat_is_tombstone(opt_meta);
+
+	set_cemetery(ns, r, is_tombstone && opt_meta->n_bins != 0);
 
 	if (is_tombstone == (r->tombstone == 1)) {
 		return;

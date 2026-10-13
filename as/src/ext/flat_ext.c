@@ -1,8 +1,9 @@
 /*
  * flat_ext.c
  *
- * Ext build - flat_ce.c plus the record-level xdr-write flag, which XDR needs
- * to tell records written by XDR from local writes (loop prevention).
+ * Ext build - flat_ce.c plus XDR metadata: the record-level xdr-write flag
+ * (loop prevention), the bin cemetery flag, and per-bin xdr-write and src-id
+ * (bin convergence).
  *
  * Copyright (C) 2019-2020 Aerospike, Inc.
  *
@@ -110,6 +111,7 @@ set_remote_record_xdr_flags(const as_flat_record* flat,
 		const as_flat_extra_flags* extra_flags, as_remote_record* rr)
 {
 	rr->xdr_write = flat->xdr_write == 1;
+	rr->xdr_bin_cemetery = extra_flags->xdr_bin_cemetery == 1;
 }
 
 void
@@ -127,8 +129,9 @@ set_flat_xdr_state(const as_record* r, as_flat_record* flat)
 as_flat_extra_flags
 get_flat_extra_flags(const as_storage_rd* rd)
 {
-	// So far all extra flags are enterprise-only.
-	return (as_flat_extra_flags){ 0 };
+	return (as_flat_extra_flags){
+		.xdr_bin_cemetery = rd->r->xdr_bin_cemetery
+	};
 }
 
 size_t
@@ -171,33 +174,59 @@ unpack_mrt_orig_v(const uint8_t* at, const uint8_t* end,
 void
 unpack_bin_xdr_write(uint8_t flags, as_bin* b)
 {
+	b->xdr_write = (flags & BIN_XDR_WRITE) != 0 ? 1 : 0;
 }
 
 const uint8_t*
 unpack_bin_src_id(uint8_t flags, const uint8_t* at, const uint8_t* end, as_bin* b)
 {
+	if ((flags & BIN_HAS_SRC_ID) == 0) {
+		return at;
+	}
+
+	if (at >= end) {
+		cf_warning(AS_FLAT, "incomplete flat bin");
+		return NULL;
+	}
+
+	b->src_id = *at++;
+
 	return at;
 }
 
 const uint8_t*
 skip_bin_src_id(uint8_t flags, const uint8_t* at, const uint8_t* end)
 {
-	return at;
+	if ((flags & BIN_HAS_SRC_ID) == 0) {
+		return at;
+	}
+
+	return at < end ? at + 1 : NULL;
 }
 
 void
 flatten_bin_xdr_write(const as_bin* b, uint8_t* flags)
 {
+	if (b->xdr_write == 1) {
+		*flags |= BIN_XDR_WRITE;
+	}
 }
 
 uint32_t
 bin_src_id_flat_size(const as_bin* b)
 {
-	return 0;
+	return b->src_id != 0 ? 1 : 0;
 }
 
 uint32_t
 flatten_bin_src_id(const as_bin* b, uint8_t* flags, uint8_t* at)
 {
-	return 0;
+	if (b->src_id == 0) {
+		return 0;
+	}
+
+	*flags |= BIN_HAS_SRC_ID;
+	*at = b->src_id;
+
+	return 1;
 }

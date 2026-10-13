@@ -36,3 +36,7 @@ EXT_REPLACED_SOURCES += base/xdr_ce.c
 EXT_SOURCES += xdr_ext.c
 EXT_REPLACED_SOURCES += storage/flat_ce.c
 EXT_SOURCES += flat_ext.c
+
+# Bin convergence (P3b).
+EXT_REPLACED_SOURCES += base/bin_ce.c
+EXT_SOURCES += bin_ext.c

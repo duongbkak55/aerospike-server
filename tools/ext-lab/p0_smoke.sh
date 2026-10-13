@@ -16,12 +16,12 @@ EXT_ASD="$2"
 export EXT_LAB_DIR="${EXT_LAB_DIR:-$(mktemp -d)}"
 CLUSTER="$SCRIPT_DIR/cluster.sh"
 SECURITY_CONF="$EXT_LAB_DIR/security.conf"
-CRW_CONF="$EXT_LAB_DIR/crw.conf"
+SC_CONF="$EXT_LAB_DIR/sc.conf"
 failures=0
 
 mkdir -p "$EXT_LAB_DIR"
 printf 'security {\n}\n' > "$SECURITY_CONF"
-printf 'conflict-resolve-writes true\n' > "$CRW_CONF"
+printf 'strong-consistency true\n' > "$SC_CONF"
 
 check() {
 	if [[ "$1" == 0 ]]; then
@@ -58,9 +58,8 @@ expect_rejected() {
 
 expect_rejected "$CE_ASD" "$SECURITY_CONF" "'security' is enterprise-only" \
 	"CE build rejects security context"
-expect_rejected "$EXT_ASD" "$CRW_CONF" \
-	"'conflict-resolve-writes' is not yet implemented (P3)" \
-	"ext build rejects not-yet-implemented conflict-resolve-writes" -N
+expect_rejected "$EXT_ASD" "$SC_CONF" "'strong-consistency' is enterprise-only" \
+	"ext build rejects enterprise-only items it doesn't provide" -N
 
 "$CLUSTER" start -n 3 -a "$EXT_ASD" > /dev/null
 "$CLUSTER" wait -n 3 -t 30 > /dev/null

@@ -63,7 +63,12 @@ static const ext_feature EXT_FEATURES[] = {
 
 		// XDR, including active-active bin convergence.
 		{ "xdr", "P3a", true },
-		{ "conflict-resolve-writes", "P3", false }
+		{ "conflict-resolve-writes", "P3b", true },
+		{ "xdr-bin-tombstone-ttl", "P3b", true },
+		// Accepted for compatibility - bin cemeteries are removed by the tomb
+		// raider, and bin tombstones by the writes that find them expired.
+		{ "xdr-tomb-raider-period", "P3b", true },
+		{ "xdr-tomb-raider-threads", "P3b", true }
 };
 
 #define N_EXT_FEATURES (sizeof(EXT_FEATURES) / sizeof(ext_feature))

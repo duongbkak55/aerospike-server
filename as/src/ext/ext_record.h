@@ -79,6 +79,28 @@ void ext_cold_start_drop_cenotaphs(struct as_namespace_s* ns);
 void ext_tomb_raider_check_wblock(struct as_namespace_s* ns,
 		const uint8_t* buf);
 
+// Bin convergence - XDR LUTs (the message LUT field and per-op LUTs) carry
+// the writing cluster's src-id in the top byte, the LUT in the rest.
+#define EXT_XDR_LUT_MASK ((1UL << 56) - 1)
+
+static inline uint64_t
+ext_xdr_pack_lut(uint64_t lut, uint8_t src_id)
+{
+	return ((uint64_t)src_id << 56) | (lut & EXT_XDR_LUT_MASK);
+}
+
+static inline uint64_t
+ext_xdr_lut(uint64_t packed)
+{
+	return packed & EXT_XDR_LUT_MASK;
+}
+
+static inline uint8_t
+ext_xdr_src_id(uint64_t packed)
+{
+	return (uint8_t)(packed >> 56);
+}
+
 // XDR - a non-durable delete on the master. Ships a delete if the record is
 // still gone when the ship worker gets to it.
 void ext_xdr_submit_drop(const struct as_namespace_s* ns,

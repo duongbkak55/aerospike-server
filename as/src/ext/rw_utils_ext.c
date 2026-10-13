@@ -1,8 +1,9 @@
 /*
  * rw_utils_ext.c
  *
- * Ext build - read/write hooks with durable delete (tombstone) support.
- * Based on transaction/rw_utils_ce.c.
+ * Ext build - read/write hooks with durable delete (tombstone) support and
+ * bin convergence (conflict-resolve-writes). Based on
+ * transaction/rw_utils_ce.c.
  *
  * Copyright (C) 2016-2024 Aerospike, Inc.
  *
@@ -40,12 +41,41 @@
 #include "msg.h"
 #include "vector.h"
 
+#include "base/cfg.h"
 #include "base/datamodel.h"
 #include "base/index.h"
 #include "base/proto.h"
 #include "base/transaction.h"
 #include "storage/storage.h"
 #include "transaction/rw_request.h"
+
+#include "ext_record.h"
+
+//==========================================================
+// Typedefs & constants.
+//
+
+// Bin convergence - per-transaction state. Set by prepare_bin_metadata() and
+// forbid_resolve(), which run on the transaction's thread before its ops.
+typedef struct resolve_ctx_s {
+	uint64_t old_lut; // record LUT before this write, 0 if new
+	bool old_binless_tombstone; // all bins were deleted at old_lut
+	bool xdr; // XDR write to a conflict-resolve-writes namespace
+	uint64_t msg_lut; // packed - see ext_xdr_pack_lut()
+} resolve_ctx;
+
+static __thread resolve_ctx tl_rc;
+
+
+//==========================================================
+// Forward declarations.
+//
+
+static bool incoming_wins(const as_bin* b, uint64_t packed_lut);
+static void set_resolved_meta(as_storage_rd* rd, as_bin* b,
+		uint64_t packed_lut);
+static uint64_t op_packed_lut(const as_msg_op* op, uint64_t msg_lut);
+
 
 //==========================================================
 // Public API.
@@ -69,6 +99,7 @@ make_durable_delete_write(const cl_msg* msgp)
 	new_msgp->proto.sz += sizeof(as_msg_op);
 	new_msgp->msg.n_ops++;
 	new_msgp->msg.info2 &= ~AS_MSG_INFO2_DELETE;
+	new_msgp->msg.info2 |= AS_MSG_INFO2_DURABLE_DELETE;
 
 	// Tombstones don't expire - also avoids TTL checks (e.g. ttl disallowed
 	// with nsup-period 0) rejecting the delete.
@@ -77,11 +108,20 @@ make_durable_delete_write(const cl_msg* msgp)
 	return new_msgp;
 }
 
+// With bin convergence every delete is durable - a delete must leave LUTs
+// behind, or an older write arriving later would bring the record back.
+static bool
+must_convert(const as_namespace* ns, const as_transaction* tr)
+{
+	return as_transaction_is_durable_delete(tr) ||
+			(ns->conflict_resolve_writes && as_transaction_is_delete(tr));
+}
+
 bool
 convert_to_write(as_transaction* tr, cl_msg** p_msgp)
 {
 	// Shared messages (batch) were converted by convert_batched_to_write().
-	if (! as_transaction_is_durable_delete(tr) || SHARED_MSGP(tr)) {
+	if (! must_convert(tr->rsv.ns, tr) || SHARED_MSGP(tr)) {
 		return false;
 	}
 
@@ -100,7 +140,7 @@ void
 convert_batched_to_write(const as_namespace* ns, as_transaction* tr,
 		void** p_extra_msgps)
 {
-	if (! as_transaction_is_durable_delete(tr)) {
+	if (! must_convert(ns, tr)) {
 		return;
 	}
 
@@ -191,10 +231,11 @@ generation_check(const as_record* r, const as_msg* m, const as_namespace* ns)
 	return true; // no generation requirement
 }
 
+// Bins missing from a replace must leave LUTs behind - not supported.
 bool
 forbid_replace(const as_namespace* ns)
 {
-	return false;
+	return ns->conflict_resolve_writes;
 }
 
 void
@@ -202,7 +243,13 @@ prepare_bin_metadata(const as_transaction* tr, as_storage_rd* rd)
 {
 	as_record* r = rd->r;
 
-	rd->bin_luts = false; // no usage with independent LUTs yet
+	rd->bin_luts = rd->ns->conflict_resolve_writes;
+
+	tl_rc.old_lut = r->generation != 0 ? r->last_update_time : 0;
+	tl_rc.old_binless_tombstone = r->generation != 0 && r->tombstone == 1 &&
+			r->xdr_bin_cemetery == 0;
+	tl_rc.xdr = false;
+	tl_rc.msg_lut = 0;
 
 	if (rd->bin_luts) {
 		for (uint32_t i = 0; i < rd->n_bins; i++) {
@@ -230,6 +277,7 @@ unwind_index_metadata(const as_record* old_r, as_record* r)
 	r->last_update_time = old_r->last_update_time;
 	r->generation = old_r->generation;
 	r->tombstone = old_r->tombstone;
+	r->xdr_bin_cemetery = old_r->xdr_bin_cemetery;
 	r->xdr_write = old_r->xdr_write;
 }
 
@@ -241,44 +289,73 @@ set_xdr_write(const as_transaction* tr, as_record* r)
 	r->xdr_write = as_transaction_is_xdr(tr) ? 1 : 0;
 }
 
+// A touch re-stamps live bins with the new record LUT. Bin tombstones keep
+// theirs.
 void
 touch_bin_metadata(as_storage_rd* rd)
 {
-	if (rd->bin_luts) { // no usage with independent LUTs yet
+	if (rd->bin_luts) {
 		for (uint32_t i = 0; i < rd->n_bins; i++) {
-			rd->bins[i].lut = 0;
+			as_bin* b = &rd->bins[i];
+
+			if (as_bin_is_live(b)) {
+				b->lut = 0;
+				b->src_id = 0;
+				b->xdr_write = 0;
+			}
 		}
 	}
 }
 
 // Called before the record is written to storage. A durable delete leaves a
-// non-expiring tombstone - any other write makes the record live again.
+// non-expiring tombstone, as does a write leaving only bin tombstones (a bin
+// cemetery) - any other write makes the record live again.
 void
 transition_delete_metadata(as_transaction* tr, as_record* r, bool is_delete,
 		bool is_bin_cemetery)
 {
 	if (! is_delete) {
 		r->tombstone = 0;
+		r->xdr_bin_cemetery = 0;
 		return;
 	}
 
-	if (as_transaction_is_durable_delete(tr)) {
+	if (is_bin_cemetery || as_transaction_is_durable_delete(tr)) {
 		r->tombstone = 1;
+		r->xdr_bin_cemetery = is_bin_cemetery ? 1 : 0;
 		r->void_time = 0;
 	}
 }
 
+// Called at the start of a write's ops. Only notes the XDR context here.
 bool
 forbid_resolve(const as_transaction* tr, const as_storage_rd* rd, uint64_t msg_lut)
 {
+	tl_rc.xdr = rd->ns->conflict_resolve_writes && as_transaction_is_xdr(tr);
+	tl_rc.msg_lut = msg_lut;
+
 	return false;
 }
 
+// An XDR write op applies only if it is newer than the bin it would change -
+// by LUT, then by src-id. Losing every op loses the whole write.
 bool
 resolve_bin(as_storage_rd* rd, const as_msg_op* op, uint64_t msg_lut,
 		uint16_t n_ops, uint16_t* n_won, int* result)
 {
-	return true;
+	if (! tl_rc.xdr || op->op != AS_MSG_OP_WRITE) {
+		return true;
+	}
+
+	as_bin* b = as_bin_get_w_len(rd, op->name, op->name_sz);
+
+	if (incoming_wins(b, op_packed_lut(op, msg_lut))) {
+		return true;
+	}
+
+	*result = --(*n_won) == 0 ? AS_ERR_LOST_CONFLICT : AS_OK;
+
+	return false;
 }
 
 bool
@@ -287,29 +364,85 @@ udf_resolve_bin(as_storage_rd* rd, const char* name)
 	return true;
 }
 
+// With bin convergence a deleted bin becomes a tombstone carrying the
+// delete's LUT - including a bin not (yet) here, which a write shipped from
+// elsewhere may still bring.
 void
 delete_bin(as_storage_rd* rd, const as_msg_op* op, uint64_t msg_lut)
 {
-	as_bin_delete_w_len(rd, op->name, op->name_sz);
+	if (! rd->ns->conflict_resolve_writes) {
+		as_bin_delete_w_len(rd, op->name, op->name_sz);
+		return;
+	}
+
+	as_bin* b = as_bin_get_or_create_w_len(rd, op->name, op->name_sz);
+
+	as_bin_set_tombstone(b);
+
+	if (tl_rc.xdr) {
+		set_resolved_meta(rd, b, op_packed_lut(op, msg_lut));
+	}
 }
 
 void
 udf_delete_bin(as_storage_rd* rd, const char* name)
 {
-	as_bin_delete(rd, name);
+	if (! rd->ns->conflict_resolve_writes) {
+		as_bin_delete(rd, name);
+		return;
+	}
+
+	as_bin* b = as_bin_get_or_create(rd, name);
+
+	as_bin_set_tombstone(b);
 }
 
+// The bin was just (re)created - meta is clear. XDR writes keep the shipped
+// bin's LUT and src-id.
 void
 write_resolved_bin(as_storage_rd* rd, const as_msg_op* op, uint64_t msg_lut,
 		as_bin* b)
 {
+	if (tl_rc.xdr) {
+		set_resolved_meta(rd, b, op_packed_lut(op, msg_lut));
+	}
 }
 
-// Caller has already handled destroying all bins' particles.
+// Caller has already handled destroying all bins' particles. With bin
+// convergence live bins become tombstones - for an XDR delete only those older
+// than the delete.
 void
 delete_all_bins(as_storage_rd* rd)
 {
-	rd->n_bins = 0;
+	if (! rd->ns->conflict_resolve_writes) {
+		rd->n_bins = 0;
+		return;
+	}
+
+	bool xdr = tl_rc.xdr && ext_xdr_lut(tl_rc.msg_lut) != 0;
+
+	for (uint32_t i = 0; i < rd->n_bins; i++) {
+		as_bin* b = &rd->bins[i];
+
+		if (! as_bin_is_live(b)) {
+			continue; // existing tombstones keep their LUTs
+		}
+
+		if (xdr && ! incoming_wins(b, tl_rc.msg_lut)) {
+			continue;
+		}
+
+		as_bin_set_tombstone(b);
+
+		if (xdr) {
+			set_resolved_meta(rd, b, tl_rc.msg_lut);
+		}
+		else {
+			b->lut = 0; // the new record LUT
+			b->src_id = 0;
+			b->xdr_write = 0;
+		}
+	}
 }
 
 //==========================================================
@@ -410,4 +543,68 @@ record_replace_check(as_record* r, as_namespace* ns)
 void
 record_replaced(as_record* r, as_remote_record* rr)
 {
+}
+
+
+//==========================================================
+// Local helpers - bin convergence.
+//
+
+static uint64_t
+op_packed_lut(const as_msg_op* op, uint64_t msg_lut)
+{
+	return op->has_lut == 1 ? as_msg_op_get_lut(op) : msg_lut;
+}
+
+// Bins hold LUT 0 and src-id 0 for "same as the record" and "this cluster".
+// A bin that isn't here is older than anything - unless the record was a
+// tombstone, whose LUT then applies to every bin.
+static bool
+incoming_wins(const as_bin* b, uint64_t packed_lut)
+{
+	uint64_t lut = ext_xdr_lut(packed_lut);
+
+	if (lut == 0) {
+		return true; // sender has no LUTs - plain overwrite
+	}
+
+	uint8_t src_id = ext_xdr_src_id(packed_lut);
+	uint64_t cur_lut;
+	uint8_t cur_src_id = g_config.xdr_cfg.src_id;
+
+	if (b != NULL) {
+		cur_lut = b->lut != 0 ? b->lut : tl_rc.old_lut;
+
+		if (b->src_id != 0) {
+			cur_src_id = b->src_id;
+		}
+	}
+	else if (tl_rc.old_binless_tombstone) {
+		cur_lut = tl_rc.old_lut;
+	}
+	else {
+		return true;
+	}
+
+	return lut > cur_lut || (lut == cur_lut && src_id > cur_src_id);
+}
+
+// The record LUT never falls behind its bins' LUTs - so a later local write,
+// stamped with a newer record LUT, beats every bin it overwrites.
+static void
+set_resolved_meta(as_storage_rd* rd, as_bin* b, uint64_t packed_lut)
+{
+	uint64_t lut = ext_xdr_lut(packed_lut);
+
+	if (lut == 0) {
+		return; // sender has no LUTs - treat as a local write
+	}
+
+	b->lut = lut;
+	b->src_id = ext_xdr_src_id(packed_lut);
+	b->xdr_write = 1;
+
+	if (rd->r->last_update_time < lut) {
+		rd->r->last_update_time = lut;
+	}
 }

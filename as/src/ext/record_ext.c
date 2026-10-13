@@ -74,6 +74,11 @@ as_record_set_lut(as_record* r, uint32_t regime, uint64_t now_ms,
 	if (r->last_update_time < now_ms) {
 		r->last_update_time = now_ms;
 	}
+	// With bin convergence a write must also be newer than every bin it may
+	// overwrite - XDR can leave bin (and record) LUTs ahead of our clock.
+	else if (ns->conflict_resolve_writes && r->generation != 0) {
+		r->last_update_time++;
+	}
 }
 
 void
@@ -85,11 +90,12 @@ as_record_increment_generation(as_record* r, const as_namespace* ns)
 	}
 }
 
-// Tombstones have no bins - no need to read storage.
+// Tombstones have no bins - no need to read storage. Bin cemeteries keep
+// their bin tombstones.
 bool
 as_record_is_binless(const as_record* r)
 {
-	return r->tombstone == 1;
+	return r->tombstone == 1 && r->xdr_bin_cemetery == 0;
 }
 
 bool
@@ -113,6 +119,10 @@ as_record_drop_stats(as_record* r, as_namespace* ns)
 	if (r->tombstone == 1) {
 		// Undo the tombstone counters, then it's a plain object drop.
 		ext_record_count_transition(r, ns, true, false);
+
+		if (r->xdr_bin_cemetery == 1) {
+			as_decr_uint64(&ns->n_xdr_bin_cemeteries);
+		}
 	}
 
 	as_namespace_release_set_id(ns, as_index_get_set_id(r));
@@ -128,6 +138,13 @@ as_record_transition_stats(as_record* r, as_namespace* ns, const as_record* old_
 	bool was_tombstone = old_r->generation != 0 && old_r->tombstone == 1;
 
 	ext_record_count_transition(r, ns, was_tombstone, r->tombstone == 1);
+
+	bool was_cemetery = was_tombstone && old_r->xdr_bin_cemetery == 1;
+	bool is_cemetery = r->tombstone == 1 && r->xdr_bin_cemetery == 1;
+
+	if (was_cemetery != is_cemetery) {
+		as_add_uint64(&ns->n_xdr_bin_cemeteries, is_cemetery ? 1 : -1);
+	}
 }
 
 // The set index holds live records only.
@@ -139,7 +156,7 @@ as_record_transition_set_index(as_index_tree* tree, as_index_ref* r_ref,
 
 	bool was_live = old_r != NULL && old_r->generation != 0 &&
 			old_r->tombstone == 0;
-	bool is_live = n_bins != 0;
+	bool is_live = n_bins != 0 && r->tombstone == 0; // bin cemeteries have bins
 
 	if (was_live && ! is_live) {
 		as_set_index_delete(ns, tree, as_index_get_set_id(r), r_ref->r_h);
@@ -162,14 +179,15 @@ record_resolve_conflict_cp(uint16_t left_gen, uint64_t left_lut,
 	return 0;
 }
 
-// A remote record with no bins is a tombstone.
+// A remote record with no bins, or only bin tombstones, is a tombstone.
 void
 replace_index_metadata(const as_remote_record* rr, as_record* r)
 {
 	r->generation = (uint16_t)rr->generation;
 	r->void_time = trim_void_time(rr->void_time);
 	r->last_update_time = rr->last_update_time;
-	r->tombstone = rr->n_bins == 0 ? 1 : 0;
+	r->tombstone = rr->n_bins == 0 || rr->xdr_bin_cemetery ? 1 : 0;
+	r->xdr_bin_cemetery = rr->n_bins != 0 && rr->xdr_bin_cemetery ? 1 : 0;
 	r->xdr_write = rr->xdr_write ? 1 : 0;
 }
 

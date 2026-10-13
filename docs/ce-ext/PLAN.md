@@ -434,8 +434,19 @@ song. P3b phụ thuộc P2a vì dùng chung cơ chế tombstone.
    - Đã test active-active giữa hai cluster cục bộ bằng `p3a_xdr_test.sh` (26/26).
    - Core không phải sửa.
 
-   Còn lại:
-   - P3b: hội tụ theo bin. Hiện tại khi hai DC cùng ghi một key gần như cùng lúc, hai bên
-     có thể lệch nhau.
-   - P3c: phục hồi (queue bền, last-ship-time, đổi master), pipelining.
-7. Tiếp theo: P3b (bin convergence).
+7. **P3b – Hội tụ theo bin đã cài đặt** (xem `XDR.md`, mục "Hội tụ theo bin"):
+   - Bật bằng `conflict-resolve-writes true` (namespace), `src-id` (xdr) và
+     `ship-bin-luts true` (DC namespace).
+   - Mỗi bin có LUT và `src-id`. Write qua XDR được resolve từng bin (ghi sau thắng, hoà thì
+     `src-id` lớn hơn thắng). Xoá bin để lại bin tombstone, xoá record tạo bin cemetery.
+   - LUT của record tăng đơn điệu nên write cục bộ luôn mới hơn bin mà nó ghi đè.
+   - Bin tombstone quá `xdr-bin-tombstone-ttl` bị bỏ ở lần ghi kế tiếp. Bin cemetery được
+     tomb raider dọn.
+   - Đã test bằng `p3b_converge_test.sh`: cắt mạng giữa hai DC bằng proxy, ghi xung đột ở
+     cả hai phía rồi nối lại, kiểm tra hai bên giống hệt nhau. Chạy với memory và file
+     storage (có cold restart).
+   - Core không phải sửa.
+
+   Còn lại (P3c): phục hồi (queue bền, last-ship-time, đổi master), ship chỉ bin đã đổi,
+   pipelining.
+8. Tiếp theo: P3c (XDR bền vững).
