@@ -9,6 +9,17 @@ và `asinfo` dùng được mà không phải sửa.
 
 ---
 
+## 0. Quyết định đã chốt (13/10/2026)
+
+| # | Câu hỏi | Quyết định | Ảnh hưởng tới kế hoạch |
+|---|---|---|---|
+| 1 | Phạm vi Auth | **Chỉ user nội bộ** (internal). | Bỏ LDAP, PKI và Kerberos khỏi lộ trình. |
+| 2 | Mô hình XDR | **Active-active.** | Bin-convergence (giải xung đột theo bin bằng LUT và `src-id`) trở thành phần **bắt buộc**, không còn tuỳ chọn. **Cả hai cluster đều phải chạy bản mở rộng.** Xem mục 3.4. |
+| 3 | TLS | **Không làm.** | Cách ly bằng hạ tầng mạng (mạng riêng, VPN hoặc WireGuard giữa các DC) là điều kiện bắt buộc khi triển khai. Xem mục 6. |
+| 4 | Pháp lý (AGPL, EULA) | **Tạm chưa đánh giá. Owner quyết định trước.** | Trong lúc chờ, vẫn giữ nguyên tắc clean-room ở mục 2 để không tự đóng mất lựa chọn nào. Chưa phát hành binary ra ngoài. |
+
+---
+
 ## 1. Kết quả khảo sát base code
 
 ### 1.1 Cách server tách CE / EE
@@ -125,7 +136,7 @@ hook đó và thêm module mới; không phải viết lại transaction path.
 | Allowlist / Quota | Giai đoạn 1b. Allowlist kiểm tra lúc login theo IP. Quota dùng token bucket theo user (`as_security_check_rps` / `done_rps` dành cho query/scan). |
 | Audit log | `as_security_log` / `as_audit_log` ghi vào log context `AS_SECURITY` (đã có) theo cờ `report-*` trong `security { log {...} }`. Syslog để sau. |
 | Info/config | `as_security_get_config`, `as_security_set_config` (`enable-quotas`, `privilege-refresh-period`, `session-ttl`, `report-*`). |
-| Ngoài phạm vi giai đoạn 1 | LDAP, PKI, Kerberos. LDAP có thể thêm ở giai đoạn sau bằng libldap. |
+| Ngoài phạm vi (đã chốt) | LDAP, PKI, Kerberos. Chỉ hỗ trợ user nội bộ. |
 
 **Lưu ý:**
 - **Fabric và heartbeat giữa các node không được xác thực**, giống bản EE khi không bật TLS.
@@ -197,8 +208,9 @@ trên SSD cho tới khi bị defrag. Vì vậy:
 
 ### 3.3 XDR (Cross Datacenter Replication)
 
-**Mô hình đề xuất:** shipper chạy trong process (in-process), active–passive trước, ship
-ở mức record.
+**Mô hình:** shipper chạy trong process (in-process), **active-active**, mỗi cluster vừa là
+nguồn vừa là đích của cluster kia. Phần ship ở mục này dùng chung cho cả hai chiều. Phần giải
+xung đột nằm ở mục 3.4.
 
 ```
 write/delete trên master ─► as_xdr_submit(digest, lut, set_id, flags)
@@ -220,28 +232,79 @@ write/delete trên master ─► as_xdr_submit(digest, lut, set_id, flags)
 
 | Thành phần | Thiết kế |
 |---|---|
-| Config/khởi tạo | Cài đặt thật `as_xdr_startup_create_dc`, `_dc_ns_cfg`, `_add_seed`, `as_xdr_link_tls`. Gỡ `cfg_enterprise_only` cho `CASE_XDR_*`. Có `src-id`. |
+| Config/khởi tạo | Cài đặt thật `as_xdr_startup_create_dc`, `_dc_ns_cfg`, `_add_seed`. `as_xdr_link_tls` giữ là no-op vì không làm TLS. Gỡ `cfg_enterprise_only` cho `CASE_XDR_*`. `src-id` **bắt buộc khác nhau** giữa các cluster. |
 | Submit | Ring buffer MPSC cho từng cặp (DC, ns), giới hạn bởi `transaction-queue-limit`. Lọc theo `ship-only-specified-sets`, `ignored_sets` và cờ `xdr_write` (chống vòng lặp khi `forward = false`). Áp `delay-ms`. Áp `hot-key-ms`: hash digest→lut, gộp nhiều write liên tiếp trên cùng một key. |
 | Hot key | `as_xdr_ship_check` trả `XDR_SHIP_NEAR`/`FAR` khi một key đang được ship, để tránh ship lại liên tục. |
 | LST & recovery | Mỗi partition có một LST, là mốc LUT mà mọi thay đổi trước nó đều đã được ship. LST được persist định kỳ qua SMD module `XDR` (hoặc file trong thư mục smd). Khi queue tràn, node restart, partition đổi master, hoặc DC vừa được thêm, chạy `as_index_reduce` trên partition và ship mọi record có `LUT > LST`. Số thread recovery do `n_recovery_threads` quy định. |
 | Master-only | Chỉ master của partition mới ship. Khi master thay đổi, master mới chạy recovery từ LST đã replicate. LST nên được gửi kèm replica write hoặc qua SMD theo chu kỳ. Chấp nhận ship trùng lặp (idempotent) thay vì để mất dữ liệu. |
-| Reader | Cài đặt `as_xdr_read`: tạo `as_msg` bằng các helper sẵn có trong `proto.c`. `bin-policy` giai đoạn 1 chỉ có `all`. `write-policy` là `auto`, `update` hoặc `replace`. Với tombstone thì gửi delete kèm cờ durable. |
+| Reader | Cài đặt `as_xdr_read`: tạo `as_msg` bằng các helper sẵn có trong `proto.c`. Với active-active thì dùng `bin-policy only-changed` và `ship-bin-luts true`. Mỗi op mang LUT của bin (cờ `has_lut` trong `as_msg_op`, đã có sẵn), còn message mang field `AS_MSG_FIELD_TYPE_LUT`. Bin đã bị xoá được ship dưới dạng op delete kèm LUT. Với tombstone của record thì gửi delete kèm cờ durable. |
 | Delete | Durable delete ship qua tombstone. Delete thường (không durable) sinh `xdr_tombstone` tạm để kịp ship rồi xoá. Đây là lý do cần làm tombstone trước XDR. Delete do nsup (expire/evict) chỉ ship khi bật `ship-nsup-deletes`. |
 | Shipper | I/O non-blocking chạy trên poll của service thread, vì core đã gọi sẵn `as_xdr_init_poll`, `io_event` và `timer_event`. Có connection pool, giới hạn `max-throughput`, timeout và retry. Tự viết client tối giản: login, partition map, write, delete. **Không** nhúng aerospike-client-c in-process, vì tên symbol `as_record`, `as_bin`… trùng với server. |
-| Auth tới đích | `auth-mode internal`, `auth-user`, `auth-password-file`, dùng chính protocol ở mục 3.1. TLS phụ thuộc mục 6. |
-| Phía đích | Không cần sửa gì: CE gốc hoặc bản mở rộng đều nhận write có `INFO1_XDR`. |
+| Auth tới đích | `auth-mode internal`, `auth-user`, `auth-password-file`, dùng chính protocol ở mục 3.1. Không có TLS, kênh XDR đi qua VPN giữa các DC. |
+| Phía đích | Phải là bản mở rộng, vì cần giải xung đột theo bin (mục 3.4). CE gốc chỉ dùng được cho mô hình active-passive. Tài khoản XDR ở đích cần quyền `write`; nếu dùng `reject-non-xdr-writes` thì cấu hình theo namespace. |
 | Thống kê / info | `as_xdr_get_stats`: `lag`, `in_queue`, `in_progress`, `success`, `abandoned`, `not_found`, `filtered_out`, `retry_conn_reset`, `retry_dest`, `recoveries`, `recoveries_pending`, `throughput`, `latency_ms`. Thêm `as_xdr_dc_state`, `as_xdr_get_config` / `set_config` (thêm/bớt DC và namespace lúc runtime) và `as_xdr_ticker`. |
-| Giai đoạn sau | `bin-policy` changed-only (cần LUT theo bin, `set_xdr_write`, `xdr_bin_cemetery`), **bin-convergence** cho active-active (`resolve_bin`, `forbid_resolve`, `src-id`), filter bằng expression (`as_xdr_set_filter` lưu SMD), compression, connector (HTTP/Kafka), XDR cho namespace strong-consistency. |
+| Giai đoạn sau | Filter bằng expression (`as_xdr_set_filter` lưu SMD), compression (cần cài đặt `flat_ce.c` / zstd), connector (HTTP/Kafka), topology nhiều hơn 2 DC (mesh với `forward`). |
 
-Phương án dự phòng (MVP nhanh): process sidecar dùng client Java/Go chính thức.
-- Server chỉ đẩy `(digest, lut)` ra Unix socket.
-- Sidecar đọc record từ nguồn rồi ghi sang đích.
-- Ưu điểm: ra MVP nhanh khoảng 3–4 tuần.
-- Nhược điểm:
-  - Đọc thêm một lần trên nguồn.
-  - Khó đảm bảo đúng LUT và thứ tự, recovery phức tạp hơn.
-  - Không giữ được ngữ nghĩa XDR cho write.
-- Chỉ nên dùng nếu cần DR gấp.
+Không chọn phương án sidecar (process ngoài dùng client chính thức). Lý do: client không
+ghi được LUT và `src-id` theo bin, nên không làm được active-active.
+
+### 3.4 Active-active: giải xung đột theo bin (bin convergence)
+
+**Vấn đề.** Khi hai DC cùng ghi một key:
+- Ship ở mức record thì bản đến sau đè toàn bộ bản kia, nên mất update và hai bên không
+  hội tụ.
+- Ship lại write nhận từ XDR thì sinh vòng lặp.
+
+**Khung có sẵn trong code** (đã kiểm tra):
+- `as_bin` có `lut` (40 bit) và `src_id`. Có cờ `xdr_write` theo bin.
+- `as_msg_op` có `has_lut`, kèm `as_msg_op_get_lut()`.
+- `write.c` gọi `forbid_resolve`, `resolve_bin`, `write_resolved_bin`, `delete_bin` với
+  `msg_lut`.
+- `storage_rd` có `bin_luts`.
+- Định dạng flat có hook `flatten_bin_src_id`, `unpack_bin_src_id` và cờ `xdr_bin_cemetery`.
+- Namespace có `conflict-resolve-writes`, `xdr-bin-tombstone-ttl`, `xdr-tomb-raider-period`
+  và `n_xdr_tomb_raider_threads`.
+- Bin tombstone có `as_bin_is_tombstone` và `as_bin_set_tombstone` (hiện là stub trong
+  `bin_ce.c`).
+
+**Quy tắc hội tụ** (giống nhau trên mọi cluster nên kết quả là tất định):
+- So sánh cặp `(bin_lut, src_id)`: LUT lớn hơn thắng; nếu LUT bằng nhau thì `src_id` lớn
+  hơn thắng.
+- Write cục bộ (không qua XDR) dùng `lut = now`, `src_id = 0`, có kiểm tra để LUT không
+  bao giờ lùi.
+- Write nhận qua XDR: với từng op, so `op_lut` (hoặc `msg_lut` nếu op không có LUT) với LUT
+  của bin hiện tại.
+  - Op thua thì bỏ qua (`n_won--`).
+  - Thua toàn bộ thì trả `AS_ERR_LOST_CONFLICT`. Phía ship coi đây là thành công.
+- Xoá bin cũng phải ghi lại LUT, nếu không bản cũ ship đến sau sẽ hồi sinh bin đó. Vì vậy
+  xoá bin tạo **bin tombstone** (bin không có giá trị, chỉ giữ LUT và `src_id`).
+  - Record chỉ còn bin tombstone gọi là **bin cemetery** (`xdr_bin_cemetery`).
+  - **XDR tomb raider** dọn bin tombstone sau `xdr-bin-tombstone-ttl`.
+- Xoá cả record (durable delete) tạo tombstone có LUT (mục 3.2) và đi qua cùng quy tắc.
+  Write cũ hơn tombstone sẽ thua.
+
+**Việc cần cài đặt:**
+
+| Hook / file | Nội dung |
+|---|---|
+| `rw_utils_ext.c` | `prepare_bin_metadata` bật `rd->bin_luts` khi `conflict-resolve-writes` hoặc `xdr_ships_bin_luts`. Cài đặt `forbid_resolve`, `resolve_bin`, `write_resolved_bin` (ghi LUT và `src_id` vào bin), `delete_bin` / `udf_delete_bin` (tạo bin tombstone thay vì xoá hẳn), `touch_bin_metadata`, `set_xdr_write` (đánh dấu bin và record do XDR ghi để không ship ngược), `transition_delete_metadata` (bin cemetery). Thêm `udf_resolve_bin`. |
+| `bin_ext.c` | Thêm particle/state cho bin tombstone. Cài đặt `as_bin_is_tombstone`, `as_bin_set_tombstone`, `as_bin_empty_if_all_tombstones`. Read path (`as_bin_is_live`) phải ẩn bin tombstone với client. |
+| `flat_ext.c` | Lưu và đọc LUT, `src_id`, cờ `xdr_write` của bin (`flatten_bin_*` / `unpack_bin_*`), và extra flags `xdr_tombstone`, `xdr_nsup_tombstone`, `xdr_bin_cemetery`. **Định dạng trên disk phải khớp các trường đã khai báo trong `flat.h`.** |
+| `record_ext.c` | Đếm thống kê `n_xdr_bin_cemeteries` và `n_xdr_tombstones`. Thêm tiêu chí resolve record ở chế độ LUT khi bin LUT bằng nhau. |
+| `xdr_ext/*` | Reader ship chỉ những bin đã đổi kể từ LST: bin có `lut > LST` và không phải do XDR ghi khi `forward = false`. Gửi kèm LUT của từng bin. |
+| XDR tomb raider | Thread cho mỗi namespace, chạy theo `xdr-tomb-raider-period`. Xoá bin tombstone và bin cemetery có tuổi lớn hơn `xdr-bin-tombstone-ttl`, nhưng chỉ khi mọi DC đã ship qua mốc đó (LST của mọi DC lớn hơn LUT của chúng). |
+| Migration / replica | Bin LUT, `src_id` và bin tombstone đi kèm trong flat record nên tự được replicate. Cần kiểm tra lại `as_record_replace`, vì ở chế độ bin-convergence thì merge theo bin chứ không replace cả record. |
+
+**Ràng buộc vận hành:**
+- **Đồng bộ giờ (NTP/chrony)** giữa các DC là bắt buộc, vì LUT là đồng hồ ms. Lệch giờ làm
+  sai thứ tự giữa các write gần nhau.
+- Đặt ngưỡng cảnh báo lệch giờ. Có thể dùng `as_record_handle_clock_skew` và
+  `clock_skew_stop_writes_sec`.
+- Ngữ nghĩa là **last-writer-wins theo từng bin.** Các thao tác đọc-sửa-ghi như increment,
+  CDT list/map hay UDF chạy đồng thời ở hai DC **không cộng dồn**: một bên sẽ thắng. Ứng dụng
+  cần biết điều này. Hoặc định tuyến một key về một DC chính. Ghi rõ trong tài liệu sử dụng.
+- Index lớn hơn vì có bin tombstone và cemetery. Mỗi bin tốn thêm 6 byte metadata (LUT và
+  `src_id`) trên storage.
 
 ---
 
@@ -254,12 +317,15 @@ Phương án dự phòng (MVP nhanh): process sidecar dùng client Java/Go chín
 | **P1b – Auth mở rộng** | Allowlist, quota, `set-config` động, refresh privilege, đo overhead | 2 tuần | Overhead ≤ 3% TPS (đo bằng kvbench) |
 | **P2a – Tombstone/durable delete** | Đường ghi tombstone (master, replica, migrate, cold start), read path, thống kê | 3–4 tuần | Kịch bản zombie: write → durable delete → cold restart / node rời rồi vào lại cluster → record **không** sống lại. |
 | **P2b – Tomb raider** | Ba bước mark / unmark (quét device) / remove, cấu hình tham số, throttle | 2–3 tuần | Tombstone được thu hồi sau eligible-age và không bao giờ xoá nhầm khi còn bản cũ trên disk. |
-| **P3a – XDR MVP** | Config DC, submit queue, reader, shipper async, partition map đích, auth tới đích, stats cơ bản, active-passive, `bin-policy all` | 5–6 tuần | 2 cluster: lag p99 < 1s ở tải chuẩn. Ship đúng insert/update/durable delete. |
-| **P3b – XDR bền vững** | LST + recovery (queue tràn, restart, đổi master, DC down/up), hot key, throttle, thêm/bớt DC động, `ship-nsup-deletes` | 4–5 tuần | Chaos test (kill node, cắt mạng DC) → hội tụ, không mất write. |
-| **P3c – Tuỳ chọn** | TLS (mục 6), bin-policy changed, bin-convergence active-active, expression filter, compression | 4–8 tuần | Theo nhu cầu |
+| **P3a – XDR ship** | Config DC, submit queue, reader, shipper async, partition map đích, auth tới đích, stats cơ bản. Kiểm thử trước một chiều với `bin-policy all`. | 5–6 tuần | 2 cluster: lag p99 < 1s ở tải chuẩn. Ship đúng insert/update/durable delete. |
+| **P3b – Bin convergence** | Bin LUT, `src_id`, bin tombstone (mục 3.4), `resolve_bin`, `set_xdr_write` chống ship ngược, `bin-policy only-changed` + `ship-bin-luts`, lưu metadata bin trên disk, XDR tomb raider | 5–6 tuần | 2 cluster cùng ghi một tập key ở cả hai phía → sau khi hội tụ, hai bên **giống hệt nhau từng bin** (checker so sánh toàn bộ), không có vòng lặp ship. |
+| **P3c – XDR bền vững** | LST + recovery (queue tràn, restart, đổi master, DC down/up), hot key, throttle, thêm/bớt DC động, `ship-nsup-deletes` | 4–5 tuần | Chaos test (kill node, cắt mạng giữa hai DC khi cả hai đang ghi) → hội tụ, không mất write. |
+| **P3d – Tuỳ chọn** | Expression filter, compression, topology nhiều hơn 2 DC | Theo nhu cầu | — |
 
-Tổng cho phạm vi cốt lõi (P0 → P3b): khoảng **5–6 tháng** với 1 dev, hoặc **3–4 tháng**
-với 2 dev chạy song song. Sau P0, nhánh Auth và nhánh Tombstone có thể làm song song.
+Tổng cho phạm vi cốt lõi (P0 → P3c): khoảng **6–7 tháng** với 1 dev, hoặc **4–5 tháng**
+với 2 dev. Active-active thêm khoảng 5–6 tuần so với kế hoạch active-passive ban đầu; bỏ
+TLS và LDAP bớt được khoảng 3–5 tuần. Sau P0, nhánh Auth và nhánh Tombstone có thể làm song
+song. P3b phụ thuộc P2a vì dùng chung cơ chế tombstone.
 
 ---
 
@@ -272,7 +338,8 @@ với 2 dev chạy song song. Sau P0, nhánh Auth và nhánh Tombstone có thể
   - Ring queue của XDR.
 - **Integration (docker compose):**
   - Cluster 3 node RF=2 cho Auth và Tombstone.
-  - Hai cluster cho XDR (nguồn là bản mở rộng, đích là CE gốc).
+  - Hai cluster cho XDR active-active, cả hai đều là bản mở rộng, `src-id` khác nhau. Có thể
+    giả lập lệch giờ bằng `libfaketime`.
   - Chạy bằng Java client của **kvbench**: đã dùng client 8.1.5, chỉ cần thêm cấu hình
     `user`/`password` vào driver Aerospike.
 - **Chaos/consistency:** kill -9 node, cắt mạng (`tc`/iptables), restart cold start.
@@ -289,33 +356,32 @@ với 2 dev chạy song song. Sau P0, nhánh Auth và nhánh Tombstone có thể
 
 ---
 
-## 6. Rủi ro & quyết định cần chốt
+## 6. Rủi ro
 
-1. **TLS đang là stub** (`modules/common/cf/src/tls_ce.c`). Khi không có TLS:
-   - Credential (bcrypt hash, tương đương mật khẩu) và session token đi dạng plaintext.
-   - XDR qua WAN không được mã hoá.
-
-   Phương án:
-   - (a) Cài đặt TLS bằng OpenSSL trong `modules/common`, mất 2–3 tuần. Lưu ý đây là một
-     submodule riêng nên cần fork.
-   - (b) Đặt cluster sau mạng riêng hoặc VPN/WireGuard, hoặc dùng stunnel cho XDR.
-
-   **Đề xuất:** đi theo (b) cho giai đoạn đầu, làm (a) trong P3c.
+1. **Không có TLS (đã chốt).** Credential (bcrypt hash, tương đương mật khẩu), session
+   token và dữ liệu XDR đều đi dạng plaintext. Điều kiện triển khai bắt buộc:
+   - Port service (3000) chỉ mở cho mạng ứng dụng.
+   - Fabric và heartbeat nằm trên mạng nội bộ riêng.
+   - XDR giữa hai DC đi qua VPN hoặc WireGuard.
+   - Ghi rõ các điều kiện này trong runbook.
 2. **Tương thích tool.** `asadm` và client có thể dựa vào `edition` hay `features` để bật
    chức năng security. Cần kiểm tra ngay từ P0.
 3. **Bộ nhớ index tăng do tombstone:** mỗi tombstone tốn 64B index. Tomb raider phải chạy
    ổn định, cần cảnh báo khi `tombstones/objects` cao.
 4. **Đúng đắn của XDR khi đổi master hoặc migrate:** đây là phần khó nhất. Chấp nhận ship
-   trùng lặp (at-least-once). Đích dùng LUT để bản ghi cũ không ghi đè bản mới. Cần thời
-   gian chaos test đủ dài.
-5. **Pháp lý:** AGPL-3.0 và EULA của EE. Clean-room, không dùng thương hiệu.
-6. **Phạm vi strong-consistency (SC):** bản CE không có SC. Kế hoạch này chỉ nhắm namespace
+   trùng lặp (at-least-once). Nhờ quy tắc LUT theo bin, ship trùng lặp hay sai thứ tự đều
+   không làm sai kết quả. Cần thời gian chaos test đủ dài.
+5. **Active-active và đồng hồ:** hội tụ dựa vào LUT, nên lệch giờ giữa các DC làm sai thứ tự
+   giữa các write gần nhau. Phép cộng dồn (increment, CDT) chạy đồng thời ở hai phía không
+   được merge. Cần thống nhất với đội ứng dụng (mục 3.4).
+6. **Pháp lý:** AGPL-3.0 và EULA của EE. Owner sẽ đánh giá sau. Trong lúc chờ: làm
+   clean-room, không dùng thương hiệu, chưa phát hành binary ra ngoài tổ chức.
+7. **Phạm vi strong-consistency (SC):** bản CE không có SC. Kế hoạch này chỉ nhắm namespace
    AP.
 
 ## 7. Bước tiếp theo đề xuất
 
-1. Chốt phạm vi: auth-mode internal có đủ không hay cần LDAP; XDR là active-passive hay
-   active-active; TLS theo phương án (a) hay (b).
+1. ~~Chốt phạm vi~~: đã chốt ở mục 0.
 2. Làm P0: tạo khung `USE_EXT`, gỡ gating config, dựng harness docker 2 cluster và thêm
    cấu hình auth cho kvbench.
 3. Bắt đầu P1a (Auth) song song với P2a (Tombstone).
