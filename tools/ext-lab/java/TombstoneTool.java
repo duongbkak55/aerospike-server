@@ -9,8 +9,13 @@
 //   TombstoneTool <port> count <set> <n>            n = keys that exist (gets)
 //   TombstoneTool <port> scan <set>                 n = records a scan returns
 //   TombstoneTool <port> generation <set> <key-ix>  n = record generation, -1 if none
+//   TombstoneTool <port> churn <set> <n> <rounds> <bytes>
+//                                                   overwrite n keys 'rounds' times
+//                                                   with <bytes>-sized blobs - cycles
+//                                                   storage blocks through defrag
 
 import com.aerospike.client.AerospikeClient;
+import com.aerospike.client.AerospikeException;
 import com.aerospike.client.BatchResults;
 import com.aerospike.client.Bin;
 import com.aerospike.client.Host;
@@ -110,12 +115,56 @@ public class TombstoneTool {
 				result = r == null ? -1 : r.generation;
 				break;
 			}
+			case "churn": {
+				int n = Integer.parseInt(args[3]);
+				int rounds = Integer.parseInt(args[4]);
+				byte[] blob = new byte[Integer.parseInt(args[5])];
+
+				for (int round = 0; round < rounds; round++) {
+					blob[0] = (byte)round;
+
+					for (int i = 0; i < n; i++) {
+						putRetry(c, key(set, i), new Bin("b", blob));
+					}
+
+					sleep(5); // let defrag keep up
+				}
+
+				result = (long)n * rounds;
+				break;
+			}
 			default:
 				throw new IllegalArgumentException("unknown step " + step);
 			}
 		}
 
 		System.out.println("RESULT " + result);
+	}
+
+	// Small lab files can briefly hit stop-writes while defrag catches up.
+	static void putRetry(AerospikeClient c, Key key, Bin bin) {
+		for (int attempt = 0; ; attempt++) {
+			try {
+				c.put(null, key, bin);
+				return;
+			}
+			catch (AerospikeException e) {
+				if (e.getResultCode() != 8 || attempt == 100) {
+					throw e;
+				}
+
+				sleep(100);
+			}
+		}
+	}
+
+	static void sleep(long ms) {
+		try {
+			Thread.sleep(ms);
+		}
+		catch (InterruptedException e) {
+			Thread.currentThread().interrupt();
+		}
 	}
 
 	static Key key(String set, int i) {

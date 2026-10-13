@@ -421,4 +421,9 @@ song. P3b phụ thuộc P2a vì dùng chung cơ chế tombstone.
      đếm ở mức namespace, set và partition.
    - Đã test hai kịch bản zombie: cold restart, và node cũ vào lại cluster.
    - Core không phải sửa.
-5. Tiếp theo: P2b (tomb raider), vì hiện tombstone không bao giờ được dọn.
+5. **P2b – Tomb raider đã cài đặt** (xem `TOMBSTONE.md`):
+   - Ba bước mark / quét storage để unmark / remove.
+   - Cold start bỏ các tombstone đủ tuổi mà không còn bản cũ.
+   - Config `tomb-raider-*` đã mở. Riêng `unmark-threads` và `serialize` được chấp nhận
+     nhưng bị bỏ qua.
+6. Tiếp theo: P3 (XDR active-active).

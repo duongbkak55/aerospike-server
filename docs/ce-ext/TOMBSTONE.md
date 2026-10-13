@@ -1,6 +1,6 @@
-# Durable delete & tombstone (P2a) – bản build `USE_EXT=1`
+# Durable delete, tombstone (P2a) & tomb raider (P2b) – bản build `USE_EXT=1`
 
-Kế hoạch tổng xem `PLAN.md`. Phần dọn tombstone (tomb raider) là P2b, **chưa làm**.
+Kế hoạch tổng xem `PLAN.md`.
 
 ## Vấn đề
 
@@ -52,13 +52,50 @@ Client gửi delete với cờ durable. Đây là API sẵn có của mọi clie
 
 Core **không phải sửa**: các hook EE và các chỗ kiểm tra `as_record_is_live` đã có sẵn.
 
+## Tomb raider (P2b) – dọn tombstone
+
+Mỗi namespace có một thread chạy theo chu kỳ `tomb-raider-period`:
+
+1. **Mark:** đánh dấu (`cenotaph`) các tombstone có LUT cũ hơn `tomb-raider-eligible-age`.
+2. **Unmark:** quét **toàn bộ** storage, kể cả wblock đã free nhưng chưa bị ghi đè, vì
+   cold start cũng đọc các wblock đó.
+   - Tombstone nào còn một bản live cũ hơn trên storage thì bị bỏ đánh dấu. Lý do: xoá nó
+     thì lần cold start sau, bản cũ đó sẽ sống lại.
+   - Giữa hai lần đọc wblock, thread nghỉ `tomb-raider-sleep` micro giây.
+3. **Remove:** xoá khỏi index các tombstone vẫn còn đánh dấu và vẫn đủ tuổi. Record
+   được ghi lại hoặc xoá lại sau bước mark có LUT mới hơn nên không bị xoá nhầm.
+
+Ngoài ra:
+- Bỏ qua chu kỳ nếu còn migration đang chạy hoặc chưa xong.
+- Memory storage không có file shadow thì không cần quét (dữ liệu không qua được restart),
+  nên tombstone bị xoá ngay khi đủ tuổi.
+- **Cold start:** tombstone nạp lại từ đĩa mà không có bản cũ nào và đã đủ tuổi thì bị bỏ
+  luôn ở cuối cold start (hook `drop_cenotaphs`). Nhờ vậy flat còn sót của các tombstone đã
+  xoá không quay lại thành tombstone.
+
+| Config (namespace) | Mặc định | Ghi chú |
+|---|---|---|
+| `tomb-raider-eligible-age` | 1 ngày | Phải **lớn hơn thời gian tối đa một node có thể vắng mặt**. Nếu không, khi node vắng lâu quay lại, bản cũ nó giữ sẽ sống lại vì tombstone ở các node khác đã bị xoá. |
+| `tomb-raider-period` | 1 ngày | Đặt 0 để tắt tomb raider. |
+| `storage-engine.tomb-raider-sleep` | 1000 µs | Thời gian nghỉ giữa hai lần đọc wblock. |
+| `tomb-raider-unmark-threads`, `serialize-tomb-raider` | – | Chấp nhận để tương thích config nhưng **bị bỏ qua** (có log cảnh báo). Mỗi namespace quét bằng một thread. |
+
+Log mỗi chu kỳ có dạng:
+`{ns} tomb raider: N tombstones, M eligible, K removed in T ms`.
+
+**Một tombstone chỉ được xoá khi mọi bản cũ của record đã bị ghi đè vật lý trên đĩa.** Trên
+hệ thống có ghi liên tục, việc này diễn ra tự nhiên khi defrag tái sử dụng wblock. Trên hệ
+thống ít ghi, tombstone có thể tồn tại lâu hơn `eligible-age`, đây là hành vi an toàn có chủ
+đích.
+
 ## Hạn chế hiện tại
 
-- **Chưa có tomb raider (P2b):** tombstone tồn tại mãi. Mỗi tombstone tốn 64B index, cộng
-  một bản ghi nhỏ trên storage. Cần theo dõi stat `tombstones` cho tới khi có P2b. Cách giải
-  phóng hiện có là `truncate`.
+- Mỗi tombstone tốn 64B index cộng một bản ghi nhỏ trên storage cho tới khi tomb raider xoá
+  được. Nên theo dõi stat `tombstones`.
+- Bước quét storage đọc toàn bộ device mỗi chu kỳ (chỉ khi có tombstone đủ tuổi). Với
+  device lớn, nên giữ `tomb-raider-period` dài và đặt `tomb-raider-sleep` phù hợp.
 - Write xoá bin cuối cùng mà không durable vẫn để lại tombstone trên replica: master gửi
-  pickle 0 bin, giống CE. Tombstone này vô hại vì không hiển thị, và sẽ do P2b dọn.
+  pickle 0 bin, giống CE. Tombstone này vô hại vì không hiển thị, và sẽ được tomb raider dọn.
 - Durable delete đi theo đường write, nên được đếm vào thống kê write (`client_write_*`),
   không vào `client_delete_*`. Durable delete cũng bị chặn khi namespace ở trạng thái
   stop-writes.
@@ -69,7 +106,13 @@ Core **không phải sửa**: các hook EE và các chỗ kiểm tra `as_record_
 
 ```sh
 tools/ext-lab/p2a_tombstone_test.sh <asd-ext> <kvbench.jar>
+tools/ext-lab/p2b_tomb_raider_test.sh <asd-ext> <kvbench.jar>
 ```
+
+`p2b_tomb_raider_test.sh` có 13 kiểm tra, chạy với `period` 2 giây và `eligible-age` 3 giây:
+- **Memory storage:** tombstone đủ tuổi bị xoá; record đã ghi lại không bị xoá.
+- **File storage:** tombstone được giữ lại khi còn bản cũ trên đĩa. Sau khi churn ghi đè
+  các bản cũ thì tombstone bị xoá, và cold restart sau đó không làm record nào sống lại.
 
 28 kiểm tra:
 - 1 node lưu file, cold restart, batch.

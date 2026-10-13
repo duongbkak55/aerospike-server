@@ -20,6 +20,7 @@ file trong `ext/` và file stub tương ứng bị build lại.
 | `cfg_ext.c` | `base/cfg_ce.c` | Mở cổng chặn config theo từng tính năng | mục bên dưới |
 | `security_ext.c` | `base/security_ce.c` | Auth với user nội bộ, RBAC | `docs/ce-ext/AUTH.md` |
 | `record_ext.c`, `rw_utils_ext.c`, `delete_ext.c`, `drv_common_ext.c`, `drv_ssd_ext.c`, `drv_mem_ext.c` | các bản `*_ce.c` tương ứng | Durable delete và tombstone | `docs/ce-ext/TOMBSTONE.md` |
+| `tomb_raider_ext.c` | (file mới) | Tomb raider dọn tombstone | `docs/ce-ext/TOMBSTONE.md` |
 
 ## Cách tách code
 
@@ -60,8 +61,13 @@ Thư mục `tools/ext-lab/` chứa công cụ test, chạy được mà không c
   bằng Java client chính thức.
 - `p2a_tombstone_test.sh <asd-ext> <client.jar>`: kiểm tra durable delete, cold restart,
   node vào lại cluster, replica và bộ đếm theo set.
-- `cluster.sh` có thêm `-s file` (lưu namespace ra file để test cold start), cùng hai lệnh
-  `start-node` / `stop-node` để bật/tắt từng node.
+- `p2b_tomb_raider_test.sh <asd-ext> <client.jar>`: kiểm tra tomb raider với memory
+  storage và với file storage (ép defrag ghi đè bản cũ bằng churn).
+- `cluster.sh` có thêm các tuỳ chọn:
+  - `-s file`: lưu namespace ra file, để test cold start.
+  - `-F <size>`: kích thước file.
+  - `-N ns.conf`: chèn config vào trong namespace.
+  - `start-node` / `stop-node`: bật/tắt từng node.
 
 Cả hai biến thể đều ghi binary ra cùng một đường dẫn `target/.../bin/asd`, nên phải copy
 mỗi binary ra chỗ khác sau khi build, rồi mới chạy `p0_smoke.sh`.

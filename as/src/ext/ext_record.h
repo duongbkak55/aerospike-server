@@ -25,12 +25,14 @@
 //
 
 #include <stdbool.h>
+#include <stdint.h>
 
 //==========================================================
 // Forward declarations.
 //
 
 struct as_flat_opt_meta_s;
+struct as_flat_record_s;
 struct as_index_ref_s;
 struct as_index_s;
 struct as_index_tree_s;
@@ -55,3 +57,23 @@ void ext_record_set_tombstone(struct as_index_s* r, struct as_namespace_s* ns,
 void drv_cold_start_transition_tombstone(struct as_namespace_s* ns,
 		const struct as_flat_opt_meta_s* opt_meta, struct as_index_tree_s* tree,
 		struct as_index_ref_s* r_ref);
+
+// Tomb raider - 'scan' reads every record on persistent storage and calls
+// ext_tomb_raider_check_flat() for each. NULL if storage doesn't persist.
+typedef void (*ext_tomb_raider_scan_fn)(struct as_namespace_s* ns);
+
+void ext_tomb_raider_start(struct as_namespace_s* ns,
+		ext_tomb_raider_scan_fn scan);
+void ext_tomb_raider_check_flat(struct as_namespace_s* ns,
+		const struct as_flat_record_s* flat);
+
+// Cold start - a tombstone with no older live copy on storage is a cenotaph.
+// adjust: an older version of r was found on storage. drop: remove eligible
+// cenotaphs once all storage is read.
+void ext_cold_start_adjust_cenotaph(const struct as_flat_record_s* flat,
+		struct as_index_s* r);
+void ext_cold_start_drop_cenotaphs(struct as_namespace_s* ns);
+
+// Calls ext_tomb_raider_check_flat() for each record in a wblock buffer.
+void ext_tomb_raider_check_wblock(struct as_namespace_s* ns,
+		const uint8_t* buf);

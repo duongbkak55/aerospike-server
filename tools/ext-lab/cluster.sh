@@ -5,14 +5,15 @@
 #
 # Usage:
 #   cluster.sh start      [-n nodes] [-c cluster-index] [-a asd] [-x extra.conf]
-#                         [-s memory|file]
+#                         [-s memory|file] [-N ns.conf] [-F filesize]
 #   cluster.sh stop       [-c cluster-index]
 #   cluster.sh wait       [-n nodes] [-c cluster-index] [-t seconds]
 #   cluster.sh start-node -i node [-n nodes] [-c ...] [-a ...] [-x ...] [-s ...]
 #   cluster.sh stop-node  -i node [-c cluster-index]
 #
 # '-s file' stores namespace 'test' in a file (cold start reloads it) instead of
-# memory only. Nodes restarted with start-node keep their data.
+# memory only. Nodes restarted with start-node keep their data. '-N ns.conf' is
+# inserted inside namespace 'test'; '-F' sets the file size (default 256M).
 #
 # Node i (0-based) of cluster c listens on service port 3000 + 100*c + 10*i,
 # fabric +1 and heartbeat +2. Two clusters (c=0, c=1) can run side by side for
@@ -38,8 +39,10 @@ extra=""
 timeout_s=30
 storage=memory
 node=""
+ns_extra=""
+filesize=256M
 
-while getopts "n:c:a:x:t:s:i:" opt; do
+while getopts "n:c:a:x:t:s:i:N:F:" opt; do
 	case "$opt" in
 	n) nodes="$OPTARG" ;;
 	c) cluster="$OPTARG" ;;
@@ -48,6 +51,8 @@ while getopts "n:c:a:x:t:s:i:" opt; do
 	t) timeout_s="$OPTARG" ;;
 	s) storage="$OPTARG" ;;
 	i) node="$OPTARG" ;;
+	N) ns_extra="$OPTARG" ;;
+	F) filesize="$OPTARG" ;;
 	*) exit 2 ;;
 	esac
 done
@@ -62,8 +67,8 @@ node_dir() {
 
 storage_conf() {
 	if [[ "$storage" == file ]]; then
-		printf '\tstorage-engine device {\n\t\tfile %s/data/test.dat\n\t\tfilesize 256M\n\t\tflush-max-ms 10\n\t}' \
-			"$1"
+		printf '\tstorage-engine device {\n\t\tfile %s/data/test.dat\n\t\tfilesize %s\n\t\tflush-max-ms 10\n\t\tpost-write-cache 0\n\t\tdefrag-sleep 0\n\t}' \
+			"$1" "$filesize"
 	else
 		printf '\tstorage-engine memory {\n\t\tdata-size 1G\n\t}'
 	fi
@@ -122,6 +127,7 @@ $seeds		interval 150
 
 namespace test {
 	replication-factor 2
+$([[ -n "$ns_extra" ]] && cat "$ns_extra")
 
 $(storage_conf "$dir")
 }
@@ -216,7 +222,7 @@ stop-node)
 	fi
 	;;
 *)
-	sed -n '3,22p' "$0"
+	sed -n '3,24p' "$0"
 	exit 2
 	;;
 esac

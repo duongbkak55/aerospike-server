@@ -27,17 +27,20 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <unistd.h>
+
+#include "citrusleaf/alloc.h"
 
 #include "log.h"
 
 #include "base/datamodel.h"
 #include "base/index.h"
 #include "storage/drv_common.h"
-
-#include "ext_record.h"
 #include "storage/flat.h"
 #include "storage/storage.h"
 #include "transaction/rw_utils.h"
+
+#include "ext_record.h"
 
 void
 ssd_resume_devices(drv_ssds* ssds)
@@ -102,13 +105,13 @@ void
 ssd_cold_start_adjust_cenotaph(as_namespace* ns, const as_flat_record* flat,
 		uint32_t block_void_time, as_record* r)
 {
-	// Nothing to do - relevant for enterprise version only.
+	ext_cold_start_adjust_cenotaph(flat, r);
 }
 
 void
 ssd_cold_start_drop_cenotaphs(as_namespace* ns)
 {
-	// Nothing to do - relevant for enterprise version only.
+	ext_cold_start_drop_cenotaphs(ns);
 }
 
 conflict_resolution_pol
@@ -171,10 +174,46 @@ ssd_set_wblock_flags(as_storage_rd* rd, ssd_write_buf* swb)
 					rd->ns->storage_cache_replica_writes);
 }
 
+// Reads every wblock of every device - including free ones, whose old records
+// cold start would also read.
+static void
+tomb_raider_scan_ssds(as_namespace* ns)
+{
+	drv_ssds* ssds = (drv_ssds*)ns->storage_private;
+	uint8_t* buf = cf_valloc(WBLOCK_SZ);
+
+	for (int i = 0; i < ssds->n_ssds; i++) {
+		drv_ssd* ssd = &ssds->ssds[i];
+		int fd = ssd_fd_get(ssd);
+
+		for (uint32_t wblock_id = ssd->first_wblock_id;
+				wblock_id < ssd->n_wblocks; wblock_id++) {
+			uint64_t offset = WBLOCK_ID_TO_OFFSET(wblock_id);
+
+			if (! pread_all(fd, buf, WBLOCK_SZ, (off_t)offset)) {
+				cf_warning(AS_DRV_SSD, "%s: tomb raider read failed",
+						ssd->name);
+				break;
+			}
+
+			ssd->n_tomb_raider_reads++;
+			ext_tomb_raider_check_wblock(ns, buf);
+
+			if (ns->storage_tomb_raider_sleep != 0) {
+				usleep(ns->storage_tomb_raider_sleep);
+			}
+		}
+
+		ssd_fd_put(ssd, fd);
+	}
+
+	cf_free(buf);
+}
+
 void
 as_storage_start_tomb_raider_ssd(as_namespace* ns)
 {
-	// Tomb raider is for enterprise version only.
+	ext_tomb_raider_start(ns, tomb_raider_scan_ssds);
 }
 
 int

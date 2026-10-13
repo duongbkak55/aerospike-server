@@ -32,6 +32,8 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 #include "citrusleaf/alloc.h"
 
@@ -40,11 +42,11 @@
 #include "base/datamodel.h"
 #include "base/index.h"
 #include "storage/drv_common.h"
-
-#include "ext_record.h"
 #include "storage/flat.h"
 #include "storage/storage.h"
 #include "transaction/rw_utils.h"
+
+#include "ext_record.h"
 
 //==========================================================
 // Inlines & macros.
@@ -64,9 +66,56 @@ stripe_name(int ix)
 // Public API.
 //
 
+// Reads every wblock of every shadow file/device - what cold start reads.
+static void
+tomb_raider_scan_shadows(as_namespace* ns)
+{
+	drv_mems* mems = (drv_mems*)ns->storage_private;
+	uint8_t* buf = cf_valloc(WBLOCK_SZ);
+
+	for (int i = 0; i < mems->n_mems; i++) {
+		drv_mem* mem = &mems->mems[i];
+		int fd = open(mem->shadow_name, O_RDONLY | O_DIRECT);
+
+		if (fd < 0) {
+			cf_warning(AS_DRV_MEM, "%s: tomb raider open failed",
+					mem->shadow_name);
+			continue;
+		}
+
+		for (uint32_t wblock_id = mem->first_wblock_id;
+				wblock_id < mem->n_wblocks; wblock_id++) {
+			uint64_t offset = WBLOCK_ID_TO_OFFSET(wblock_id);
+
+			if (! pread_all(fd, buf, WBLOCK_SZ, (off_t)offset)) {
+				cf_warning(AS_DRV_MEM, "%s: tomb raider read failed",
+						mem->shadow_name);
+				break;
+			}
+
+			mem->n_tomb_raider_reads++;
+			ext_tomb_raider_check_wblock(ns, buf);
+
+			if (ns->storage_tomb_raider_sleep != 0) {
+				usleep(ns->storage_tomb_raider_sleep);
+			}
+		}
+
+		close(fd);
+	}
+
+	cf_free(buf);
+}
+
+// Without shadows, memory storage doesn't survive a restart - nothing on
+// storage can resurrect a record, so no scan is needed.
 void
 as_storage_start_tomb_raider_mem(as_namespace* ns)
 {
+	drv_mems* mems = (drv_mems*)ns->storage_private;
+	bool has_shadows = mems->n_mems != 0 && mems->mems[0].shadow_name != NULL;
+
+	ext_tomb_raider_start(ns, has_shadows ? tomb_raider_scan_shadows : NULL);
 }
 
 int
@@ -162,6 +211,7 @@ void
 cold_start_adjust_cenotaph(const as_namespace* ns, const as_flat_record* flat,
 		uint32_t block_void_time, as_record* r)
 {
+	ext_cold_start_adjust_cenotaph(flat, r);
 }
 
 void
@@ -182,6 +232,7 @@ cold_start_init_xdr_state(const as_flat_record* flat, as_record* r)
 void
 cold_start_drop_cenotaphs(as_namespace* ns)
 {
+	ext_cold_start_drop_cenotaphs(ns);
 }
 
 void

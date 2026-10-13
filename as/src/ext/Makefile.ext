@@ -27,3 +27,6 @@ EXT_REPLACED_SOURCES += storage/drv_ssd_ce.c
 EXT_SOURCES += drv_ssd_ext.c
 EXT_REPLACED_SOURCES += storage/drv_mem_ce.c
 EXT_SOURCES += drv_mem_ext.c
+
+# Tomb raider (P2b).
+EXT_SOURCES += tomb_raider_ext.c

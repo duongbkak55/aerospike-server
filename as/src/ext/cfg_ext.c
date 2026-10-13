@@ -55,11 +55,11 @@ static const ext_feature EXT_FEATURES[] = {
 		{ "security", "P1a", true },
 
 		// Durable deletes & tomb raider.
-		{ "tomb-raider-eligible-age", "P2", false },
-		{ "tomb-raider-period", "P2", false },
-		{ "tomb-raider-unmark-threads", "P2", false },
-		{ "tomb-raider-sleep", "P2", false },
-		{ "serialize-tomb-raider", "P2", false },
+		{ "tomb-raider-eligible-age", "P2b", true },
+		{ "tomb-raider-period", "P2b", true },
+		{ "tomb-raider-unmark-threads", "P2b", true },
+		{ "tomb-raider-sleep", "P2b", true },
+		{ "serialize-tomb-raider", "P2b", true },
 
 		// XDR, including active-active bin convergence.
 		{ "xdr", "P3", false },

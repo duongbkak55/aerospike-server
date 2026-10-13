@@ -90,6 +90,7 @@ drv_cold_start_record_create(as_namespace* ns, const as_flat_record* flat,
 {
 	if (opt_meta->n_bins == 0) {
 		ext_record_set_tombstone(r_ref->r, ns, true);
+		r_ref->r->cenotaph = 1; // no older copy seen yet
 		return;
 	}
 
@@ -113,9 +114,11 @@ drv_cold_start_transition_tombstone(as_namespace* ns,
 	if (is_tombstone) {
 		as_set_index_delete_live(ns, tree, r, r_ref->r_h);
 		ext_record_set_tombstone(r, ns, true);
+		r->cenotaph = 0; // replaced an older live copy
 	}
 	else {
 		ext_record_set_tombstone(r, ns, false);
+		r->cenotaph = 0;
 		as_set_index_insert(ns, tree, as_index_get_set_id(r), r_ref->r_h);
 	}
 }
