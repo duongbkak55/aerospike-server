@@ -109,6 +109,26 @@ Cấu hình YAML (`--experimental`) dùng `security: {}` với các khoá tươn
   cấu hình một mục là bật log data-op cho toàn bộ.
 - Các node trong cluster vẫn trao đổi với nhau (fabric, heartbeat) mà không xác thực.
 
+## Overhead (kvbench)
+
+Đo ngày 13/10/2026 trong môi trường lab:
+- 1 node, namespace lưu trong memory, 100k key.
+- Workload B1 (50% READ, 50% OPERATE_ABM), async, concurrency 64, warmup 10 giây, đo 45
+  giây.
+- Client và server chạy chung một máy 4 vCPU.
+- 2 vòng, các biến thể chạy xen kẽ nhau.
+
+| Biến thể | TPS vòng 1 / vòng 2 | p99 trung bình |
+|---|---|---|
+| CE gốc | 51.311 / 51.640 | 5,03 ms |
+| ext, không bật `security` | 52.495 / 52.425 | 4,87 ms |
+| ext, có `security`, user `read-write` | 52.701 / 52.742 | 4,99 ms |
+
+Không đo được overhead: mọi chênh lệch đều nằm trong mức nhiễu khoảng ±2% của môi trường
+này. Điều này phù hợp với thiết kế: mỗi request chỉ tốn một lần lock mutex của kết nối và
+duyệt danh sách privilege đã tính sẵn. Cần đo lại trên phần cứng thật, nhiều node, client
+tách riêng khỏi server.
+
 ## Test
 
 ```sh
