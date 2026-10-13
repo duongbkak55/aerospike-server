@@ -23,6 +23,7 @@ file trong `ext/` và file stub tương ứng bị build lại.
 | `tomb_raider_ext.c` | (file mới) | Tomb raider dọn tombstone | `docs/ce-ext/TOMBSTONE.md` |
 | `xdr_ext.c`, `flat_ext.c` | `base/xdr_ce.c`, `storage/flat_ce.c` | XDR ship active-active | `docs/ce-ext/XDR.md` |
 | `bin_ext.c` | `base/bin_ce.c` | Bin tombstone, hội tụ theo bin (P3b) | `docs/ce-ext/XDR.md` |
+| `xdr_recovery_ext.c` | (file mới) | XDR last-ship-time và phục hồi (P3c) | `docs/ce-ext/XDR.md` |
 
 ## Cách tách code
 
@@ -71,6 +72,8 @@ Thư mục `tools/ext-lab/` chứa công cụ test, chạy được mà không c
 - `p3b_converge_test.sh <asd-ext> <client.jar> [memory|file]`: kiểm tra hội tụ theo bin. Hai
   DC ship qua `tcpproxy.py`; tắt proxy để cắt mạng, ghi xung đột ở cả hai phía, bật lại
   proxy rồi so sánh dữ liệu hai bên.
+- `p3c_recovery_test.sh <asd-ext> <client.jar>`: kiểm tra phục hồi XDR khi queue tràn, khi
+  restart toàn cluster nguồn, và khi một node nguồn chết.
 - `cluster.sh` có thêm các tuỳ chọn:
   - `-s file`: lưu namespace ra file, để test cold start.
   - `-F <size>`: kích thước file.

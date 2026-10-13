@@ -40,3 +40,6 @@ EXT_SOURCES += flat_ext.c
 # Bin convergence (P3b).
 EXT_REPLACED_SOURCES += base/bin_ce.c
 EXT_SOURCES += bin_ext.c
+
+# XDR last-ship-time and recovery (P3c).
+EXT_SOURCES += xdr_recovery_ext.c

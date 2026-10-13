@@ -6,6 +6,7 @@
 # so both sides take conflicting writes, then must converge once healed.
 #
 # Usage: p3b_converge_test.sh <ext-asd> <jar-with-aerospike-client> [memory|file]
+#   BIN_POLICY=only-changed ships only bins changed since the last-ship-time.
 
 set -uo pipefail
 
@@ -122,9 +123,10 @@ c() {
 printf '\tconflict-resolve-writes true\n' > "$EXT_LAB_DIR/ns.conf"
 
 for i in 0 1; do
-	printf 'xdr {\n\tsrc-id %s\n\tdc %s {\n\t\tnode-address-port 127.0.0.1 %s\n\t\tnamespace test {\n\t\t\tship-bin-luts true\n\t\t}\n\t}\n}\n' \
+	printf 'xdr {\n\tsrc-id %s\n\tdc %s {\n\t\tnode-address-port 127.0.0.1 %s\n\t\tnamespace test {\n\t\t\tship-bin-luts true\n\t\t\tbin-policy %s\n\t\t}\n\t}\n}\n' \
 		"$((i + 1))" "$([[ $i == 0 ]] && echo DC2 || echo DC1)" \
-		"$([[ $i == 0 ]] && echo 3200 || echo 3300)" > "$EXT_LAB_DIR/x$i.conf"
+		"$([[ $i == 0 ]] && echo 3200 || echo 3300)" "${BIN_POLICY:-all}" \
+		> "$EXT_LAB_DIR/x$i.conf"
 done
 
 heal
@@ -136,7 +138,7 @@ done
 
 wait_stable 3000 && wait_stable 3100 || exit 1
 
-echo "== merge without partition ($STORAGE storage)"
+echo "== merge without partition ($STORAGE storage, bin-policy ${BIN_POLICY:-all})"
 
 c 3000 put m 0 a 1
 wait_drained

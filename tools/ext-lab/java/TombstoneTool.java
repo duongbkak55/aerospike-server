@@ -7,6 +7,8 @@
 //   TombstoneTool <port> batch-delete <set> <n> <durable|plain>
 //                                                   n = records deleted
 //   TombstoneTool <port> count <set> <n>            n = keys that exist (gets)
+//   TombstoneTool <port> repeat <set> <n> <rounds>  put keys <set>-0..n-1 'rounds'
+//                                                   times, value = round (1..rounds)
 //   TombstoneTool <port> count-value <set> <n> <value>
 //                                                   n = keys whose bin 'v' is <value>
 //   TombstoneTool <port> scan <set>                 n = records a scan returns
@@ -106,6 +108,19 @@ public class TombstoneTool {
 					}
 				}
 
+				break;
+			}
+			case "repeat": {
+				int n = Integer.parseInt(args[3]);
+				int rounds = Integer.parseInt(args[4]);
+
+				for (int round = 1; round <= rounds; round++) {
+					for (int i = 0; i < n; i++) {
+						c.put(null, key(set, i), new Bin("v", round));
+					}
+				}
+
+				result = (long)n * rounds;
 				break;
 			}
 			case "count-value": {

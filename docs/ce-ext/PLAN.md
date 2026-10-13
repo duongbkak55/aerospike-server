@@ -447,6 +447,20 @@ song. P3b phụ thuộc P2a vì dùng chung cơ chế tombstone.
      storage (có cold restart).
    - Core không phải sửa.
 
-   Còn lại (P3c): phục hồi (queue bền, last-ship-time, đổi master), ship chỉ bin đã đổi,
-   pipelining.
-8. Tiếp theo: P3c (XDR bền vững).
+8. **P3c – XDR bền vững đã cài đặt** (xem `XDR.md`, mục "Phục hồi"):
+   - Last-ship-time (LST) cho từng DC, công bố và lưu qua SMD module `XDR`.
+   - Phục hồi bằng cách quét index từ LST khi queue đầy, khi DC đích ngừng quá lâu, khi
+     node trở thành master của partition, và khi restart.
+   - Gộp key nóng. `bin-policy only-changed` chỉ ship bin đổi sau LST. Master tạm thời
+     (lúc đang migrate) cũng ship.
+   - Đã test bằng `p3c_recovery_test.sh`: queue tràn, restart toàn cluster nguồn, một node
+     nguồn chết. Cả ba đều không mất write.
+   - Core không phải sửa.
+
+   Còn lại:
+   - Rewind (ship dữ liệu cũ cho DC mới).
+   - Pipelining.
+   - Throttle `max-throughput`, `delay-ms`, `ship-nsup-deletes`.
+   - Đổi config DC lúc đang chạy.
+   - TLS.
+9. Tiếp theo: đo hiệu năng XDR bằng kvbench, rồi chọn các mục còn lại theo nhu cầu.

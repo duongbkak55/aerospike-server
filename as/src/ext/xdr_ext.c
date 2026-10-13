@@ -76,13 +76,13 @@
 #include "storage/storage.h"
 
 #include "ext_record.h"
+#include "ext_xdr.h"
 
 
 //==========================================================
 // Typedefs & constants.
 //
 
-#define N_SHIP_WORKERS 4 // per DC
 #define DEFAULT_QUEUE_LIMIT (16 * 1024) // per DC namespace
 #define SOCKET_TIMEOUT_MS 5000
 #define RETRY_SLEEP_MS 500
@@ -101,41 +101,6 @@ typedef struct dc_seed_s {
 	char* port;
 	char* tls_name;
 } dc_seed;
-
-typedef struct ship_item_s {
-	cf_digest keyd;
-	uint64_t lut;
-	uint32_t ns_ix;
-	bool is_drop; // non-durable delete - ship a delete if the record is gone
-} ship_item;
-
-struct xdr_dc_s;
-
-typedef struct ship_worker_s {
-	struct xdr_dc_s* dc;
-	cf_queue* q; // of ship_item
-	int fd; // destination connection, -1 if none
-	uint32_t seed_ix; // next seed to try
-} ship_worker;
-
-typedef struct dc_stats_s {
-	uint64_t success;
-	uint64_t not_found; // record gone (e.g. non-durable delete) before shipping
-	uint64_t filtered_out;
-	uint64_t abandoned; // queue full or destination rejected
-	uint64_t retry_conn; // connection or send/receive failure
-	uint64_t retry_dest; // destination returned a retryable error
-	uint64_t lag_ms; // of the last shipped record
-	uint64_t latency_us_total;
-} dc_stats;
-
-typedef struct xdr_dc_s {
-	as_xdr_dc_cfg* cfg;
-	char* credential; // NULL if no authentication
-	ship_worker workers[N_SHIP_WORKERS];
-	dc_stats stats;
-	uint64_t prev_success; // for ticker throughput
-} xdr_dc;
 
 typedef enum {
 	BUILD_OK,
@@ -164,7 +129,7 @@ static void* run_ship_worker(void* udata);
 static void ship_item_until_done(ship_worker* w, const ship_item* item);
 static void submit(const as_namespace* ns, const as_xdr_submit_info* info,
 		bool is_drop);
-static build_result build_ship_msg(const as_namespace* ns,
+static build_result build_ship_msg(const xdr_dc* dc, const as_namespace* ns,
 		const as_xdr_dc_ns_cfg* ns_cfg, const ship_item* item, cf_dyn_buf* db);
 static void build_drop_msg(const as_namespace* ns,
 		const as_xdr_dc_ns_cfg* ns_cfg, const cf_digest* keyd, cf_dyn_buf* db);
@@ -197,12 +162,28 @@ worker_for(xdr_dc* dc, const cf_digest* keyd)
 	return &dc->workers[h % N_SHIP_WORKERS];
 }
 
+// With bin LUTs, bin tombstones ship (as bin deletes). With a last-ship-time
+// (bin-policy only-changed), bins not changed since then don't ship.
+static inline bool
+bin_ships(const as_bin* b, const as_record* r, bool ship_luts, uint64_t lst)
+{
+	if (! ship_luts) {
+		return as_bin_is_live(b);
+	}
+
+	uint64_t lut = b->lut != 0 ? b->lut : r->last_update_time;
+
+	return lut > lst;
+}
+
 static inline bool
 is_master(const as_namespace* ns, const cf_digest* keyd)
 {
 	const as_partition* p = &ns->partitions[as_partition_getid(keyd)];
 
-	return p->replicas[0] == g_config.self_node;
+	// The working master (final or acting, e.g. while the final master awaits
+	// migrations) handles the partition's writes.
+	return p->working_master == g_config.self_node;
 }
 
 
@@ -214,8 +195,11 @@ void
 as_xdr_init(void)
 {
 	for (uint32_t i = 0; i < g_n_dcs; i++) {
+		g_dcs[i].ix = i;
 		link_dc(&g_dcs[i]);
 	}
+
+	ext_xdr_recovery_init(g_dcs, g_n_dcs); // loads persisted last-ship-times
 }
 
 void
@@ -231,6 +215,8 @@ as_xdr_start(void)
 		cf_info(AS_XDR, "DC %s: started %u ship workers", dc->cfg->name,
 				N_SHIP_WORKERS);
 	}
+
+	ext_xdr_recovery_start();
 }
 
 
@@ -346,26 +332,13 @@ submit(const as_namespace* ns, const as_xdr_submit_info* info, bool is_drop)
 
 	for (uint32_t i = 0; i < g_n_dcs; i++) {
 		xdr_dc* dc = &g_dcs[i];
-		const as_xdr_dc_ns_cfg* ns_cfg = dc->cfg->ns_cfgs[ns->ix];
 
-		if (ns_cfg == NULL) {
+		if (dc->cfg->ns_cfgs[ns->ix] == NULL) {
 			continue;
 		}
 
-		if ((info->xdr_write && ! ns_cfg->forward) ||
-				! set_shipped(ns_cfg, ns, info->set_id)) {
+		if (! ext_xdr_should_ship(dc, ns, info->xdr_write, info->set_id)) {
 			as_incr_uint64(&dc->stats.filtered_out);
-			continue;
-		}
-
-		ship_worker* w = worker_for(dc, &info->keyd);
-		uint32_t limit = ns_cfg->transaction_queue_limit / N_SHIP_WORKERS;
-
-		if (cf_queue_sz(w->q) >= (int)limit) {
-			// TODO - P3c: recovery from last-ship-time instead of dropping.
-			as_incr_uint64(&dc->stats.abandoned);
-			cf_ticker_warning(AS_XDR, "DC %s {%s}: queue full - abandoning",
-					dc->cfg->name, ns->name);
 			continue;
 		}
 
@@ -374,8 +347,92 @@ submit(const as_namespace* ns, const as_xdr_submit_info* info, bool is_drop)
 				.is_drop = is_drop
 		};
 
-		cf_queue_push(w->q, &item);
+		if (ext_xdr_enqueue(dc, ext_xdr_queue_limit(dc, ns->ix), &item) ==
+				ENQ_FULL) {
+			// Dropped - this write's LUT is newer than the DC's last-ship-
+			// time, so recovery from storage will ship it.
+			as_incr_uint64(&dc->stats.queue_overflows);
+			ext_xdr_request_recovery_all(dc);
+			cf_ticker_warning(AS_XDR, "DC %s {%s}: queue full - will recover from storage",
+					dc->cfg->name, ns->name);
+		}
 	}
+}
+
+// Per worker, a key is queued at most once - the queued item ships the
+// record's latest version when its turn comes.
+enqueue_result
+ext_xdr_enqueue(xdr_dc* dc, uint32_t limit, ship_item* item)
+{
+	ship_worker* w = worker_for(dc, &item->keyd);
+	uint8_t flags = (item->is_drop ? QUEUED_DROP : 0) |
+			(item->is_recovery ? QUEUED_RECOVERY : 0);
+	uint8_t queued_flags;
+
+	cf_mutex_lock(&w->lock);
+
+	if (cf_shash_get(w->queued, &item->keyd, &queued_flags) == CF_SHASH_OK) {
+		uint8_t merged = queued_flags | flags;
+
+		if (merged != queued_flags) {
+			cf_shash_put(w->queued, &item->keyd, &merged);
+
+			if ((flags & ~queued_flags & QUEUED_RECOVERY) != 0) {
+				as_incr_uint32(&dc->n_recovery_pending);
+			}
+		}
+
+		cf_mutex_unlock(&w->lock);
+		as_incr_uint64(&dc->stats.hot_keys);
+
+		return ENQ_MERGED;
+	}
+
+	if (cf_queue_sz(w->q) >= (int)limit) {
+		cf_mutex_unlock(&w->lock);
+		return ENQ_FULL;
+	}
+
+	cf_shash_put(w->queued, &item->keyd, &flags);
+
+	if (item->is_recovery) {
+		as_incr_uint32(&dc->n_recovery_pending);
+	}
+
+	ext_xdr_note_enqueued(dc, item);
+	cf_queue_push(w->q, item);
+
+	cf_mutex_unlock(&w->lock);
+
+	return ENQ_OK;
+}
+
+uint32_t
+ext_xdr_queue_limit(const xdr_dc* dc, uint32_t ns_ix)
+{
+	return dc->cfg->ns_cfgs[ns_ix]->transaction_queue_limit / N_SHIP_WORKERS;
+}
+
+uint32_t
+ext_xdr_in_queue(const xdr_dc* dc)
+{
+	uint32_t in_queue = 0;
+
+	for (uint32_t w = 0; w < N_SHIP_WORKERS; w++) {
+		in_queue += (uint32_t)cf_queue_sz(dc->workers[w].q);
+	}
+
+	return in_queue;
+}
+
+bool
+ext_xdr_should_ship(const xdr_dc* dc, const as_namespace* ns, bool xdr_write,
+		uint16_t set_id)
+{
+	const as_xdr_dc_ns_cfg* ns_cfg = dc->cfg->ns_cfgs[ns->ix];
+
+	return ns_cfg != NULL && (! xdr_write || ns_cfg->forward) &&
+			set_shipped(ns_cfg, ns, set_id);
 }
 
 void
@@ -385,20 +442,22 @@ as_xdr_ticker(uint64_t delta_time)
 		xdr_dc* dc = &g_dcs[i];
 		dc_stats* s = &dc->stats;
 		uint64_t success = as_load_uint64(&s->success);
-		uint32_t in_queue = 0;
+		uint32_t in_queue = ext_xdr_in_queue(dc);
+		uint64_t lst = as_load_uint64(&dc->lst);
+		uint64_t now = cf_clepoch_milliseconds();
 
-		for (uint32_t w = 0; w < N_SHIP_WORKERS; w++) {
-			in_queue += (uint32_t)cf_queue_sz(dc->workers[w].q);
-		}
-
-		cf_info(AS_XDR, "DC %s: in-queue %u success (%lu,%.1f) abandoned %lu not-found %lu filtered-out %lu retry (%lu,%lu) lag %lu ms",
+		cf_info(AS_XDR, "DC %s: in-queue %u success (%lu,%.1f) abandoned %lu not-found %lu filtered-out %lu hot-keys %lu retry (%lu,%lu) lag %lu ms lst-lag %lu ms recoveries (%lu,%lu,%u) overflows %lu flushes %lu",
 				dc->cfg->name, in_queue, success,
 				delta_time == 0 ? 0.0 : (double)(success - dc->prev_success) *
 						1000 / (double)delta_time,
 				as_load_uint64(&s->abandoned), as_load_uint64(&s->not_found),
-				as_load_uint64(&s->filtered_out),
+				as_load_uint64(&s->filtered_out), as_load_uint64(&s->hot_keys),
 				as_load_uint64(&s->retry_conn), as_load_uint64(&s->retry_dest),
-				as_load_uint64(&s->lag_ms));
+				as_load_uint64(&s->lag_ms), lst != 0 && lst < now ? now - lst : 0,
+				as_load_uint64(&s->recoveries), as_load_uint64(&s->recovered),
+				as_load_uint32(&dc->n_recovery_pending),
+				as_load_uint64(&s->queue_overflows),
+				as_load_uint64(&s->flushes));
 
 		dc->prev_success = success;
 	}
@@ -521,12 +580,7 @@ as_xdr_get_stats(const char* cmd, cf_dyn_buf* db)
 	}
 
 	dc_stats* s = &dc->stats;
-	uint32_t in_queue = 0;
-
-	for (uint32_t w = 0; w < N_SHIP_WORKERS; w++) {
-		in_queue += (uint32_t)cf_queue_sz(dc->workers[w].q);
-	}
-
+	uint32_t in_queue = ext_xdr_in_queue(dc);
 	uint64_t success = as_load_uint64(&s->success);
 
 	info_append_uint32(db, "in_queue", in_queue);
@@ -539,6 +593,13 @@ as_xdr_get_stats(const char* cmd, cf_dyn_buf* db)
 	info_append_uint64(db, "lag", as_load_uint64(&s->lag_ms));
 	info_append_uint64(db, "latency_us", success == 0 ? 0 :
 			as_load_uint64(&s->latency_us_total) / success);
+	info_append_uint64(db, "hot_keys", as_load_uint64(&s->hot_keys));
+	info_append_uint64(db, "queue_overflows",
+			as_load_uint64(&s->queue_overflows));
+	info_append_uint64(db, "recoveries", as_load_uint64(&s->recoveries));
+	info_append_uint64(db, "recovered", as_load_uint64(&s->recovered));
+	info_append_uint64(db, "flushes", as_load_uint64(&s->flushes));
+	ext_xdr_recovery_stats(dc, db);
 
 	cf_dyn_buf_chomp_char(db, ';');
 }
@@ -646,12 +707,18 @@ link_dc(xdr_dc* dc)
 	}
 
 	for (uint32_t w = 0; w < N_SHIP_WORKERS; w++) {
-		dc->workers[w] = (ship_worker){
+		ship_worker* wk = &dc->workers[w];
+
+		*wk = (ship_worker){
 				.dc = dc,
 				.q = cf_queue_create(sizeof(ship_item), true),
+				.queued = cf_shash_create(cf_shash_fn_u32, sizeof(cf_digest),
+						sizeof(uint8_t), 1024, false),
 				.fd = -1,
 				.seed_ix = w
 		};
+
+		cf_mutex_init(&wk->lock);
 	}
 }
 
@@ -731,7 +798,22 @@ run_ship_worker(void* udata)
 			continue;
 		}
 
-		ship_item_until_done(w, &item);
+		// Before reading the record - a write after this is queued anew.
+		uint8_t flags = 0;
+
+		cf_mutex_lock(&w->lock);
+		cf_shash_pop(w->queued, &item.keyd, &flags);
+		cf_mutex_unlock(&w->lock);
+
+		item.is_drop = (flags & QUEUED_DROP) != 0;
+		item.is_recovery = (flags & QUEUED_RECOVERY) != 0;
+
+		// Flushing - recovery will ship this record from storage.
+		if (! as_load_bool(&w->dc->flushing)) {
+			ship_item_until_done(w, &item);
+		}
+
+		ext_xdr_note_done(w->dc, &item);
 	}
 
 	return NULL;
@@ -749,7 +831,7 @@ ship_item_until_done(ship_worker* w, const ship_item* item)
 		cf_dyn_buf_define_size(db, 16 * 1024);
 
 		// Read the current version each attempt - ships the latest state.
-		build_result br = build_ship_msg(ns, ns_cfg, item, &db);
+		build_result br = build_ship_msg(dc, ns, ns_cfg, item, &db);
 
 		if (br != BUILD_OK) {
 			if (br == BUILD_NOT_FOUND) {
@@ -768,6 +850,11 @@ ship_item_until_done(ship_worker* w, const ship_item* item)
 
 		if (rv != 0) {
 			as_incr_uint64(&dc->stats.retry_conn);
+
+			if (as_load_bool(&dc->flushing)) {
+				return; // recovery will ship it
+			}
+
 			usleep(RETRY_SLEEP_MS * 1000);
 			continue;
 		}
@@ -791,6 +878,11 @@ ship_item_until_done(ship_worker* w, const ship_item* item)
 		case AS_ERR_OUT_OF_SPACE:
 		case AS_ERR_UNKNOWN:
 			as_incr_uint64(&dc->stats.retry_dest);
+
+			if (as_load_bool(&dc->flushing)) {
+				return; // recovery will ship it
+			}
+
 			usleep(RETRY_SLEEP_MS * 1000);
 			continue;
 		case AS_SEC_ERR_NOT_AUTHENTICATED:
@@ -811,8 +903,8 @@ ship_item_until_done(ship_worker* w, const ship_item* item)
 // the destination's record - or a durable delete for a tombstone, or a
 // non-durable delete for a dropped record.
 static build_result
-build_ship_msg(const as_namespace* ns, const as_xdr_dc_ns_cfg* ns_cfg,
-		const ship_item* item, cf_dyn_buf* db)
+build_ship_msg(const xdr_dc* dc, const as_namespace* ns,
+		const as_xdr_dc_ns_cfg* ns_cfg, const ship_item* item, cf_dyn_buf* db)
 {
 	const cf_digest* keyd = &item->keyd;
 	as_partition_reservation rsv;
@@ -837,6 +929,13 @@ build_ship_msg(const as_namespace* ns, const as_xdr_dc_ns_cfg* ns_cfg,
 	bool is_binless = as_record_is_binless(r); // bin cemeteries have bins
 	bool ship_luts = ns_cfg->ship_bin_luts;
 	uint32_t now_s = as_record_void_time_get();
+
+	// Bins not changed since the last-ship-time have shipped - unless this is
+	// recovery, which may be shipping what another master never shipped.
+	bool only_changed = ship_luts &&
+			ns_cfg->bin_policy == XDR_BIN_POLICY_ONLY_CHANGED &&
+			! ns_cfg->forward && ! item->is_recovery;
+	uint64_t lst = only_changed ? as_load_uint64(&dc->lst) : 0;
 
 	if (! is_tombstone && r->void_time != 0 && r->void_time <= now_s) {
 		as_record_done(&r_ref, (as_namespace*)ns);
@@ -878,13 +977,20 @@ build_ship_msg(const as_namespace* ns, const as_xdr_dc_ns_cfg* ns_cfg,
 
 	// With bin LUTs, bin tombstones ship too - as bin deletes.
 	for (uint16_t i = 0; i < n_bins; i++) {
-		if (ship_luts || as_bin_is_live(&rd.bins[i])) {
+		if (bin_ships(&rd.bins[i], r, ship_luts, lst)) {
 			n_ops++;
 		}
 	}
 
 	// A tombstone with no bins left to carry LUTs ships as a durable delete.
-	bool ship_delete = is_tombstone && n_ops == 0;
+	bool ship_delete = is_binless || (is_tombstone && n_bins == 0);
+
+	if (n_ops == 0 && ! ship_delete) {
+		as_storage_record_close(&rd);
+		as_record_done(&r_ref, (as_namespace*)ns);
+		as_partition_release(&rsv);
+		return BUILD_SKIP; // nothing changed since the last-ship-time
+	}
 
 	as_msg m = {
 			.header_sz = sizeof(as_msg),
@@ -936,7 +1042,7 @@ build_ship_msg(const as_namespace* ns, const as_xdr_dc_ns_cfg* ns_cfg,
 	for (uint16_t i = 0; i < n_bins; i++) {
 		as_bin* b = &rd.bins[i];
 
-		if (! ship_luts && ! as_bin_is_live(b)) {
+		if (! bin_ships(b, r, ship_luts, lst)) {
 			continue;
 		}
 
