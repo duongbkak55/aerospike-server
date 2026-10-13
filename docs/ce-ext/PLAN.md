@@ -382,6 +382,14 @@ song. P3b phụ thuộc P2a vì dùng chung cơ chế tombstone.
 ## 7. Bước tiếp theo đề xuất
 
 1. ~~Chốt phạm vi~~: đã chốt ở mục 0.
-2. Làm P0: tạo khung `USE_EXT`, gỡ gating config, dựng harness docker 2 cluster và thêm
-   cấu hình auth cho kvbench.
+2. **P0 – phần khung đã xong** (xem `as/src/ext/README.md`):
+   - Đã có cờ build `USE_EXT=1`, cơ chế thay stub qua `as/src/ext/Makefile.ext`, và hook
+     `as_config_allows_feature`.
+   - Bảng `EXT_FEATURES` mở cổng chặn config cho cả `.conf` lẫn YAML.
+   - Harness cluster chạy cục bộ không cần Docker: `tools/ext-lab`.
+   - Smoke test `p0_smoke.sh`: 4/4 đạt.
+
+   Còn lại của P0:
+   - CI build cả hai biến thể.
+   - Thêm cấu hình auth cho kvbench (làm cùng P1a).
 3. Bắt đầu P1a (Auth) song song với P2a (Tombstone).

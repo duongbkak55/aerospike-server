@@ -1,0 +1,58 @@
+# as/src/ext
+
+Phần cài đặt các tính năng mở rộng cho bản build Community: Auth, tombstone và XDR
+active-active. Kế hoạch tổng thể xem tại `docs/ce-ext/PLAN.md`.
+
+## Build
+
+```sh
+make                 # bản CE gốc, giữ nguyên như upstream
+make USE_EXT=1       # bản CE dùng code trong as/src/ext
+```
+
+Hai biến thể dùng chung thư mục object. Khi chuyển qua lại giữa hai biến thể thì chỉ các
+file trong `ext/` và file stub tương ứng bị build lại.
+
+## Cách tách code
+
+- Mỗi file `*_ext.c` thay thế đúng một file stub `*_ce.c`. Danh sách cặp thay thế khai báo
+  trong `Makefile.ext`:
+  - `EXT_REPLACED_SOURCES`: file stub bị loại khỏi build.
+  - `EXT_SOURCES`: file ext được đưa vào thay.
+- File ext cài đặt **đúng chữ ký hook** đã khai báo trong header core. Không sửa core,
+  trừ khi thật sự cần một hook mới. Khi thêm hook mới thì bản CE phải giữ nguyên hành vi
+  cũ (xem ví dụ `as_config_allows_feature` trong `base/cfg_ce.c`).
+
+## Bật config item enterprise-only
+
+Bảng `EXT_FEATURES` trong `cfg_ext.c` liệt kê các config item mà bản ext sẽ cung cấp.
+
+- Item có `ready = false`: config vẫn bị từ chối khi khởi động, với thông báo
+  `'<item>' is not yet implemented (<phase>)`. Mục đích là để config không bật nhầm một
+  stub không làm gì.
+- Khi tính năng của một item đã cài đặt xong thì đổi `ready` thành `true`. Từ lúc đó cả
+  config dạng `.conf` lẫn YAML đều chấp nhận item này.
+- Lúc khởi động, server in log `ext build - ready config items: ...` liệt kê các item đã
+  bật.
+
+## Test
+
+Thư mục `tools/ext-lab/` chứa công cụ test, chạy được mà không cần Docker:
+
+- `cluster.sh`: chạy cluster gồm nhiều `asd` cục bộ trên `127.0.0.1`.
+  - Mỗi node dùng một nhóm port riêng.
+  - Có thể chạy 2 cluster song song (`-c 0`, `-c 1`) để test XDR.
+- `asinfo.py`: client info protocol tối giản.
+- `p0_smoke.sh <asd-ce> <asd-ext>`: kiểm tra cổng chặn config và việc lập cluster.
+
+Cả hai biến thể đều ghi binary ra cùng một đường dẫn `target/.../bin/asd`, nên phải copy
+mỗi binary ra chỗ khác sau khi build, rồi mới chạy `p0_smoke.sh`.
+
+```sh
+AEROSPIKE_TELEMETRY=FALSE make && cp target/Linux-x86_64/bin/asd /tmp/asd-ce
+AEROSPIKE_TELEMETRY=FALSE make USE_EXT=1 && cp target/Linux-x86_64/bin/asd /tmp/asd-ext
+tools/ext-lab/p0_smoke.sh /tmp/asd-ce /tmp/asd-ext
+```
+
+`AEROSPIKE_TELEMETRY=FALSE` để tắt telemetry: script `build/gen_version` gửi telemetry về
+Aerospike trong lúc build.

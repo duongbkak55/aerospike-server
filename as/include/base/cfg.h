@@ -256,6 +256,10 @@ void as_config_init_namespace(struct as_namespace_s* ns);
 bool as_error_enterprise_only();
 bool as_error_enterprise_feature_only(const char* name);
 
+// True if this build provides an enterprise-only config item - 'name' is the
+// item's last path component, e.g. "security" or "tomb-raider-period".
+bool as_config_allows_feature(const char* name);
+
 extern as_config g_config;
 
 static inline histogram_scale

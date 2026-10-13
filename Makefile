@@ -101,7 +101,8 @@ targetdirs:
 	mkdir -p $(OBJECT_DIR)/base $(OBJECT_DIR)/fabric \
 		$(OBJECT_DIR)/geospatial $(OBJECT_DIR)/query \
 		$(OBJECT_DIR)/sindex $(OBJECT_DIR)/storage \
-		$(OBJECT_DIR)/transaction $(OBJECT_DIR)/xdr
+		$(OBJECT_DIR)/transaction $(OBJECT_DIR)/xdr \
+		$(OBJECT_DIR)/ext
 
 strip:	server
 	$(MAKE) -C as strip

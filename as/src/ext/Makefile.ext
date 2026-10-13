@@ -1,0 +1,9 @@
+# Aerospike Server
+# Makefile.ext
+#
+# Included by as/src/Makefile when USE_EXT=1. Each ext source replaces the CE
+# stub listed alongside it.
+#
+
+EXT_REPLACED_SOURCES += base/cfg_ce.c
+EXT_SOURCES += cfg_ext.c

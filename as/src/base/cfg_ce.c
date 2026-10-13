@@ -63,6 +63,12 @@ as_error_enterprise_feature_only(const char* name)
 	return true;
 }
 
+bool
+as_config_allows_feature(const char* name)
+{
+	return false;
+}
+
 //==========================================================
 // Private API - for enterprise separation only.
 //
