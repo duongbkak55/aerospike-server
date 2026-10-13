@@ -226,3 +226,27 @@ tools/ext-lab/p3a_xdr_test.sh <asd-ext> <kvbench.jar>
 - **File storage:** record nhận qua XDR vẫn còn sau cold restart. Write cục bộ lên các
   record này thành công và được ship ngược lại.
 - **Đích bật security:** ship với `auth-mode internal`.
+
+### Hội tụ theo bin (P3b)
+
+```sh
+tools/ext-lab/p3b_converge_test.sh <asd-ext> <kvbench.jar> memory   # 16 kiểm tra
+tools/ext-lab/p3b_converge_test.sh <asd-ext> <kvbench.jar> file     # 19 kiểm tra, có cold restart
+```
+
+- Hai cluster ship cho nhau qua `tcpproxy.py`. Tắt proxy để cắt mạng giữa hai DC, cả hai
+  phía vẫn nhận write và giữ việc ship trong queue. Bật lại proxy để nối mạng.
+- **Merge khi không cắt mạng:** bin ghi ở mỗi bên được giữ; xoá bin và xoá record được
+  ship.
+- **Xung đột khi cắt mạng:**
+  - Cùng một bin: write sau thắng, theo cả hai chiều.
+  - Khác bin: hai bên được merge.
+  - Xoá bin sau write thì xoá thắng. Write sau xoá bin thì write thắng.
+  - Xoá record sau write thì xoá thắng. Write sau xoá record thì record sống lại chỉ với
+    bin mới.
+- **Ghi ngẫu nhiên:** put, xoá bin, xoá record và increment.
+  - Lần 1: ghi ở cả hai phía khi đang cắt mạng.
+  - Lần 2: bốn writer đồng thời trên cả bốn node khi không cắt mạng.
+  - Sau khi ship xong, toàn bộ dữ liệu hai bên trùng khớp (so sánh hash).
+- **File storage:** sau cold restart cả hai cluster, dữ liệu không đổi, hai bên vẫn trùng
+  khớp, và xung đột mới vẫn được resolve đúng (dùng metadata bin nạp lại từ đĩa).
