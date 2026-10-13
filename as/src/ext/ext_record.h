@@ -37,6 +37,7 @@ struct as_index_ref_s;
 struct as_index_s;
 struct as_index_tree_s;
 struct as_namespace_s;
+struct as_xdr_submit_info_s;
 
 //==========================================================
 // Public API.
@@ -77,3 +78,8 @@ void ext_cold_start_drop_cenotaphs(struct as_namespace_s* ns);
 // Calls ext_tomb_raider_check_flat() for each record in a wblock buffer.
 void ext_tomb_raider_check_wblock(struct as_namespace_s* ns,
 		const uint8_t* buf);
+
+// XDR - a non-durable delete on the master. Ships a delete if the record is
+// still gone when the ship worker gets to it.
+void ext_xdr_submit_drop(const struct as_namespace_s* ns,
+		const struct as_xdr_submit_info_s* info);

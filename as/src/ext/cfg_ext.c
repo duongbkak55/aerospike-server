@@ -62,7 +62,7 @@ static const ext_feature EXT_FEATURES[] = {
 		{ "serialize-tomb-raider", "P2b", true },
 
 		// XDR, including active-active bin convergence.
-		{ "xdr", "P3", false },
+		{ "xdr", "P3a", true },
 		{ "conflict-resolve-writes", "P3", false }
 };
 

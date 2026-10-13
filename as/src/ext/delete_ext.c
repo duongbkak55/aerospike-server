@@ -36,9 +36,12 @@
 #include "base/proto.h"
 #include "base/set_index.h"
 #include "base/transaction.h"
+#include "base/xdr.h"
 #include "fabric/partition.h"
 #include "transaction/rw_request.h"
 #include "transaction/rw_utils.h"
+
+#include "ext_record.h"
 
 //==========================================================
 // Private API - for enterprise separation only.
@@ -75,7 +78,19 @@ delete_master(as_transaction* tr, rw_request* rw)
 		return TRANS_DONE;
 	}
 
-	return drop_master(tr, &r_ref, rw);
+	// Save for XDR submit - drop_master() releases the record.
+	as_xdr_submit_info submit_info;
+
+	as_xdr_get_submit_info(r_ref.r, 0, &submit_info);
+	submit_info.xdr_write = as_transaction_is_xdr(tr);
+
+	transaction_status status = drop_master(tr, &r_ref, rw);
+
+	if (tr->result_code == AS_OK) {
+		ext_xdr_submit_drop(tr->rsv.ns, &submit_info);
+	}
+
+	return status;
 }
 
 bool

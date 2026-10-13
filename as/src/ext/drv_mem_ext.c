@@ -227,6 +227,7 @@ cold_start_set_unrepl_stat(as_namespace* ns)
 void
 cold_start_init_xdr_state(const as_flat_record* flat, as_record* r)
 {
+	r->xdr_write = flat->xdr_write;
 }
 
 void

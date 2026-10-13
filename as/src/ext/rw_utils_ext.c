@@ -230,11 +230,15 @@ unwind_index_metadata(const as_record* old_r, as_record* r)
 	r->last_update_time = old_r->last_update_time;
 	r->generation = old_r->generation;
 	r->tombstone = old_r->tombstone;
+	r->xdr_write = old_r->xdr_write;
 }
 
 void
 set_xdr_write(const as_transaction* tr, as_record* r)
 {
+	// XDR doesn't ship records last written by XDR unless 'forward' is set -
+	// this is what stops active-active loops.
+	r->xdr_write = as_transaction_is_xdr(tr) ? 1 : 0;
 }
 
 void

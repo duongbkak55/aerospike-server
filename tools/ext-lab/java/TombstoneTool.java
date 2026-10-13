@@ -7,12 +7,16 @@
 //   TombstoneTool <port> batch-delete <set> <n> <durable|plain>
 //                                                   n = records deleted
 //   TombstoneTool <port> count <set> <n>            n = keys that exist (gets)
+//   TombstoneTool <port> count-value <set> <n> <value>
+//                                                   n = keys whose bin 'v' is <value>
 //   TombstoneTool <port> scan <set>                 n = records a scan returns
 //   TombstoneTool <port> generation <set> <key-ix>  n = record generation, -1 if none
 //   TombstoneTool <port> churn <set> <n> <rounds> <bytes>
 //                                                   overwrite n keys 'rounds' times
 //                                                   with <bytes>-sized blobs - cycles
 //                                                   storage blocks through defrag
+//
+// With security enabled, set EXT_LAB_USER / EXT_LAB_PASSWORD.
 
 import com.aerospike.client.AerospikeClient;
 import com.aerospike.client.AerospikeException;
@@ -37,6 +41,8 @@ public class TombstoneTool {
 
 		ClientPolicy cp = new ClientPolicy();
 		cp.timeout = 5000;
+		cp.user = System.getenv("EXT_LAB_USER");
+		cp.password = System.getenv("EXT_LAB_PASSWORD");
 
 		long result;
 
@@ -96,6 +102,21 @@ public class TombstoneTool {
 
 				for (int i = 0; i < n; i++) {
 					if (c.get(null, key(set, i)) != null) {
+						result++;
+					}
+				}
+
+				break;
+			}
+			case "count-value": {
+				int n = Integer.parseInt(args[3]);
+				long value = Long.parseLong(args[4]);
+				result = 0;
+
+				for (int i = 0; i < n; i++) {
+					Record r = c.get(null, key(set, i));
+
+					if (r != null && r.getLong("v") == value) {
 						result++;
 					}
 				}

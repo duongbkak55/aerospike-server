@@ -426,4 +426,16 @@ song. P3b phụ thuộc P2a vì dùng chung cơ chế tombstone.
    - Cold start bỏ các tombstone đủ tuổi mà không còn bản cũ.
    - Config `tomb-raider-*` đã mở. Riêng `unmark-threads` và `serialize` được chấp nhận
      nhưng bị bỏ qua.
-6. Tiếp theo: P3 (XDR active-active).
+6. **P3a – XDR ship đã cài đặt** (xem `XDR.md`):
+   - Config DC theo cú pháp EE, ship write, durable delete và delete thường từ master qua
+     queue và worker riêng cho từng DC.
+   - Auth tới đích (`auth-mode internal`), cờ `xdr-write` chống vòng lặp (lưu cả trên
+     storage), stats, info và ticker.
+   - Đã test active-active giữa hai cluster cục bộ bằng `p3a_xdr_test.sh` (26/26).
+   - Core không phải sửa.
+
+   Còn lại:
+   - P3b: hội tụ theo bin. Hiện tại khi hai DC cùng ghi một key gần như cùng lúc, hai bên
+     có thể lệch nhau.
+   - P3c: phục hồi (queue bền, last-ship-time, đổi master), pipelining.
+7. Tiếp theo: P3b (bin convergence).

@@ -170,6 +170,7 @@ replace_index_metadata(const as_remote_record* rr, as_record* r)
 	r->void_time = trim_void_time(rr->void_time);
 	r->last_update_time = rr->last_update_time;
 	r->tombstone = rr->n_bins == 0 ? 1 : 0;
+	r->xdr_write = rr->xdr_write ? 1 : 0;
 }
 
 //==========================================================

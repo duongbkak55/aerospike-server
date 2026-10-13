@@ -30,3 +30,9 @@ EXT_SOURCES += drv_mem_ext.c
 
 # Tomb raider (P2b).
 EXT_SOURCES += tomb_raider_ext.c
+
+# XDR shipping (P3a).
+EXT_REPLACED_SOURCES += base/xdr_ce.c
+EXT_SOURCES += xdr_ext.c
+EXT_REPLACED_SOURCES += storage/flat_ce.c
+EXT_SOURCES += flat_ext.c

@@ -135,7 +135,7 @@ ssd_cold_start_set_unrepl_stat(as_namespace* ns)
 void
 ssd_cold_start_init_xdr_state(const as_flat_record* flat, as_record* r)
 {
-	// Nothing to do - relevant for enterprise version only.
+	r->xdr_write = flat->xdr_write;
 }
 
 void
