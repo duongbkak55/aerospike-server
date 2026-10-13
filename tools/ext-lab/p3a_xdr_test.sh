@@ -99,6 +99,30 @@ wait_stable() {
 	return 1
 }
 
+# Nodes that gain partitions while the cluster forms recover them - wait, so
+# that recovery doesn't ship this test's writes a second time.
+wait_recovered() {
+	sleep 3
+
+	for _ in $(seq 60); do
+		local busy=0
+
+		for spec in "$@"; do
+			read -r port dc <<< "$spec"
+
+			if [[ "$(xdr_stat "$port" "$dc" recovering)" != false ]]; then
+				busy=1
+			fi
+		done
+
+		[[ $busy == 0 ]] && return 0
+		sleep 1
+	done
+
+	echo "recovery not done" >&2
+	return 1
+}
+
 # xdr_conf <file> <dc> <port> [extra dc lines]
 xdr_conf() {
 	printf 'xdr {\n\tdc %s {\n\t\tnode-address-port 127.0.0.1 %s\n%s\t\tnamespace test {\n\t\t}\n\t}\n}\n' \
@@ -112,6 +136,7 @@ xdr_conf "$EXT_LAB_DIR/x1.conf" DC1 3000
 "$CLUSTER" start -n 2 -c 0 -a "$ASD" -x "$EXT_LAB_DIR/x0.conf" > /dev/null
 "$CLUSTER" start -n 2 -c 1 -a "$ASD" -x "$EXT_LAB_DIR/x1.conf" > /dev/null
 wait_stable 2 3000 && wait_stable 2 3100 || exit 1
+wait_recovered "3000 DC2" "3010 DC2" "3100 DC1" "3110 DC1" || exit 1
 
 tool 3000 write a 200 1 > /dev/null
 check "$(eventually 200 3100 count-value a 200 1)" 200 "writes ship c0 -> c1"

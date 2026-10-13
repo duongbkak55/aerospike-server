@@ -186,7 +186,8 @@ Thêm vài điểm:
 
 **Hệ quả cần biết:**
 - Phục hồi có thể ship lại record đã ship. Việc này vô hại: đích ghi lại cùng nội dung,
-  hoặc trả `LOST_CONFLICT` khi bật hội tụ theo bin.
+  hoặc trả `LOST_CONFLICT` khi bật hội tụ theo bin. Ví dụ, khi cluster vừa hình thành, node
+  nhận partition sẽ quét lại các write mới nhất.
 - Node gia nhập lại hoặc restart sẽ quét lại các partition nó làm master, với mốc là LST
   cũ nhất của cluster. Sau sự cố dài, việc quét này có thể tốn tài nguyên.
 - **Delete thường (không durable) không phục hồi được**, vì record đã biến khỏi index. Cần
