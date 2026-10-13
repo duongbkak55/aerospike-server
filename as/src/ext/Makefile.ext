@@ -1,0 +1,45 @@
+# Aerospike Server
+# Makefile.ext
+#
+# Included by as/src/Makefile when USE_EXT=1. Each ext source replaces the CE
+# stub listed alongside it.
+#
+
+EXT_REPLACED_SOURCES += base/cfg_ce.c
+EXT_SOURCES += cfg_ext.c
+
+EXT_REPLACED_SOURCES += base/security_ce.c
+EXT_SOURCES += security_ext.c
+
+# bcrypt (libxcrypt) for the default admin password.
+LIBRARIES += -lcrypt
+
+# Durable deletes - tombstones (P2a).
+EXT_REPLACED_SOURCES += base/record_ce.c
+EXT_SOURCES += record_ext.c
+EXT_REPLACED_SOURCES += transaction/rw_utils_ce.c
+EXT_SOURCES += rw_utils_ext.c
+EXT_REPLACED_SOURCES += transaction/delete_ce.c
+EXT_SOURCES += delete_ext.c
+EXT_REPLACED_SOURCES += storage/drv_common_ce.c
+EXT_SOURCES += drv_common_ext.c
+EXT_REPLACED_SOURCES += storage/drv_ssd_ce.c
+EXT_SOURCES += drv_ssd_ext.c
+EXT_REPLACED_SOURCES += storage/drv_mem_ce.c
+EXT_SOURCES += drv_mem_ext.c
+
+# Tomb raider (P2b).
+EXT_SOURCES += tomb_raider_ext.c
+
+# XDR shipping (P3a).
+EXT_REPLACED_SOURCES += base/xdr_ce.c
+EXT_SOURCES += xdr_ext.c
+EXT_REPLACED_SOURCES += storage/flat_ce.c
+EXT_SOURCES += flat_ext.c
+
+# Bin convergence (P3b).
+EXT_REPLACED_SOURCES += base/bin_ce.c
+EXT_SOURCES += bin_ext.c
+
+# XDR last-ship-time and recovery (P3c).
+EXT_SOURCES += xdr_recovery_ext.c

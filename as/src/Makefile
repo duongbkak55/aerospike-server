@@ -248,6 +248,12 @@ SOURCES += $(STORAGE_SOURCES:%=storage/%)
 SOURCES += $(TRANSACTION_SOURCES:%=transaction/%)
 SOURCES += $(XDR_SOURCES:%=xdr/%)
 
+ifeq ($(USE_EXT),1)
+  include ext/Makefile.ext
+  SOURCES := $(filter-out $(EXT_REPLACED_SOURCES),$(SOURCES))
+  SOURCES += $(EXT_SOURCES:%=ext/%)
+endif
+
 SERVER = $(BIN_DIR)/asd
 
 INCLUDES += $(INCLUDE_DIR:%=-I%)

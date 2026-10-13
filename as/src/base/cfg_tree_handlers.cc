@@ -850,6 +850,21 @@ is_community_edition()
 	return as_error_enterprise_only();
 }
 
+// An enterprise-only item is rejected unless this build provides it.
+static bool
+is_feature_unavailable(const std::string& json_path)
+{
+	if (! is_community_edition()) {
+		return false;
+	}
+
+	size_t pos = json_path.find_last_of('/');
+	std::string name = pos == std::string::npos ?
+			json_path : json_path.substr(pos + 1);
+
+	return ! as_config_allows_feature(name.c_str());
+}
+
 static void
 apply_field(void* target, const nlohmann::json& source,
 		const FieldDescriptor& desc)
@@ -863,7 +878,7 @@ apply_field(void* target, const nlohmann::json& source,
 	}
 
 	// Check if this is an enterprise-only field in community edition
-	if (desc.enterprise_only && is_community_edition()) {
+	if (desc.enterprise_only && is_feature_unavailable(desc.json_path)) {
 		throw config_error(desc.json_path, "is enterprise-only");
 	}
 
@@ -2708,7 +2723,7 @@ apply_xdr_dc(const std::string& name, const nlohmann::json& dc_json,
 static void
 handle_xdr(void* target, const FieldDescriptor& desc, const nlohmann::json& source)
 {
-	if (is_community_edition()) {
+	if (is_feature_unavailable("/xdr")) {
 		throw config_error("/xdr", "is enterprise-only");
 	}
 
@@ -3138,7 +3153,7 @@ static void
 handle_security(void* target, const FieldDescriptor& desc,
 		const nlohmann::json& value)
 {
-	if (is_community_edition()) {
+	if (is_feature_unavailable("/security")) {
 		throw config_error("/security", "is enterprise-only");
 	}
 

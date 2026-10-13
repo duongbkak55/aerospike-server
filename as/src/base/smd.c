@@ -27,6 +27,7 @@
 #include "base/smd.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -2484,14 +2485,30 @@ module_commit_to_disk(smd_module* module)
 	sprintf(smd_path, "%s/smd/%s.smd", g_config.work_directory, module->name);
 	sprintf(smd_save_path, "%s.save", smd_path);
 
-	if (json_dump_file(j_file, smd_save_path, flags) != 0) {
+	// Owner-only - e.g. the security module holds credential hashes.
+	int fd = open(smd_save_path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC,
+			S_IRUSR | S_IWUSR);
+
+	if (fd < 0 || fchmod(fd, S_IRUSR | S_IWUSR) != 0 ||
+			json_dumpfd(j_file, fd, flags) != 0) {
 		cf_warning(AS_SMD, "failed dump for module '%s' to file '%s': %s (%d)",
 				module->name, smd_path, cf_strerror(errno), errno);
+
+		if (fd >= 0) {
+			close(fd);
+		}
+
 		json_decref(j_file);
 		return;
 	}
 
 	json_decref(j_file);
+
+	if (close(fd) != 0) {
+		cf_warning(AS_SMD, "failed close for module '%s' file '%s': %s (%d)",
+				module->name, smd_save_path, cf_strerror(errno), errno);
+		return;
+	}
 
 	if (rename(smd_save_path, smd_path) != 0) {
 		cf_warning(AS_SMD, "error on renaming existing file '%s': %s (%d)",
