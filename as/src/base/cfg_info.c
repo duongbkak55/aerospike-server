@@ -883,7 +883,8 @@ cfg_set(const char* name, const char* cmd, cf_dyn_buf* db)
 		}
 	}
 	else if (strcmp(context, "security") == 0) {
-		if (as_info_respond_enterprise_only(db)) {
+		if (! as_config_allows_feature("security") &&
+				as_info_respond_enterprise_only(db)) {
 			cf_warning(AS_INFO, "security is enterprise-only");
 			return;
 		}

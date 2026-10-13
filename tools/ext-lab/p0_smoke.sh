@@ -16,10 +16,12 @@ EXT_ASD="$2"
 export EXT_LAB_DIR="${EXT_LAB_DIR:-$(mktemp -d)}"
 CLUSTER="$SCRIPT_DIR/cluster.sh"
 SECURITY_CONF="$EXT_LAB_DIR/security.conf"
+XDR_CONF="$EXT_LAB_DIR/xdr.conf"
 failures=0
 
 mkdir -p "$EXT_LAB_DIR"
 printf 'security {\n}\n' > "$SECURITY_CONF"
+printf 'xdr {\n}\n' > "$XDR_CONF"
 
 check() {
 	if [[ "$1" == 0 ]]; then
@@ -30,12 +32,12 @@ check() {
 	fi
 }
 
-# Start one node with a security context; expect it to exit with 'msg'.
+# Start one node with an extra config context; expect it to exit with 'msg'.
 expect_rejected() {
-	local asd="$1" msg="$2" what="$3" pid status=0
+	local asd="$1" conf="$2" msg="$3" what="$4" pid status=0
 	local dir="$EXT_LAB_DIR/c0/n0"
 
-	"$CLUSTER" start -n 1 -a "$asd" -x "$SECURITY_CONF" > /dev/null
+	"$CLUSTER" start -n 1 -a "$asd" -x "$conf" > /dev/null
 	pid="$(cat "$dir/asd.pid")"
 
 	for _ in $(seq 50); do
@@ -54,18 +56,32 @@ expect_rejected() {
 	rm -rf "$EXT_LAB_DIR/c0"
 }
 
-expect_rejected "$CE_ASD" "'security' is enterprise-only" \
+expect_rejected "$CE_ASD" "$SECURITY_CONF" "'security' is enterprise-only" \
 	"CE build rejects security context"
-expect_rejected "$EXT_ASD" "'security' is not yet implemented (P1)" \
-	"ext build rejects not-yet-implemented security context"
+expect_rejected "$EXT_ASD" "$XDR_CONF" "'xdr' is not yet implemented (P3)" \
+	"ext build rejects not-yet-implemented xdr context"
 
 "$CLUSTER" start -n 3 -a "$EXT_ASD" > /dev/null
 "$CLUSTER" wait -n 3 -t 30 > /dev/null
 check $? "ext build forms a 3-node cluster"
 
-grep -q "ext build - ready config items: none" \
+grep -q "ext build - ready config items: security" \
 	"$EXT_LAB_DIR/c0/n0/log/aerospike.log"
 check $? "ext build logs its ready config items"
+
+# Without a security context, login answers 'not configured' (52), which
+# clients treat as "no login needed".
+python3 - "$SCRIPT_DIR" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+from asclient import Client, SecurityError
+try:
+    Client(port=3000).login("anyone", "x")
+    sys.exit(1)
+except SecurityError as e:
+    sys.exit(0 if e.code == 52 else 1)
+PY
+check $? "ext build without security answers login with 'not configured'"
 
 "$CLUSTER" stop > /dev/null
 

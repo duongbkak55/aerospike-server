@@ -405,7 +405,15 @@ song. P3b phụ thuộc P2a vì dùng chung cơ chế tombstone.
    - Harness cluster chạy cục bộ không cần Docker: `tools/ext-lab`.
    - Smoke test `p0_smoke.sh`: 4/4 đạt.
 
-   Còn lại của P0:
-   - CI build cả hai biến thể.
-   - Thêm cấu hình auth cho kvbench (làm cùng P1a).
-3. Bắt đầu P1a (Auth) song song với P2a (Tombstone).
+   Còn lại của P0: CI build cả hai biến thể.
+3. **P1a – Auth đã cài đặt** (xem `AUTH.md`):
+   - Có: user nội bộ, role định sẵn và role tự định nghĩa (giới hạn theo namespace/set),
+     login và session token, kiểm tra quyền cho thao tác dữ liệu, info và lệnh quản trị,
+     user `admin` mặc định, audit log cơ bản.
+   - Đã test bằng `p1a_auth_test.py` và `p1a_data_test.sh` (Java client chính thức).
+   - kvbench đã có sẵn cấu hình `db.aerospike.auth`, không cần sửa.
+
+   Còn lại:
+   - P1b: quota, allowlist, giới hạn tần suất login sai.
+   - Kiểm tra `asadm` và `aql`.
+4. Tiếp theo: P2a (Tombstone).

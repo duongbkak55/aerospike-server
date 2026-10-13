@@ -7,3 +7,9 @@
 
 EXT_REPLACED_SOURCES += base/cfg_ce.c
 EXT_SOURCES += cfg_ext.c
+
+EXT_REPLACED_SOURCES += base/security_ce.c
+EXT_SOURCES += security_ext.c
+
+# bcrypt (libxcrypt) for the default admin password.
+LIBRARIES += -lcrypt

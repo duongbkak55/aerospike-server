@@ -52,7 +52,7 @@ typedef struct ext_feature_s {
 
 static const ext_feature EXT_FEATURES[] = {
 		// Authentication & authorization.
-		{ "security", "P1", false },
+		{ "security", "P1a", true },
 
 		// Durable deletes & tomb raider.
 		{ "tomb-raider-eligible-age", "P2", false },

@@ -13,6 +13,13 @@ make USE_EXT=1       # bản CE dùng code trong as/src/ext
 Hai biến thể dùng chung thư mục object. Khi chuyển qua lại giữa hai biến thể thì chỉ các
 file trong `ext/` và file stub tương ứng bị build lại.
 
+## Tính năng đã có
+
+| File | Thay cho | Tính năng | Tài liệu |
+|---|---|---|---|
+| `cfg_ext.c` | `base/cfg_ce.c` | Mở cổng chặn config theo từng tính năng | mục bên dưới |
+| `security_ext.c` | `base/security_ce.c` | Auth với user nội bộ, RBAC | `docs/ce-ext/AUTH.md` |
+
 ## Cách tách code
 
 - Mỗi file `*_ext.c` thay thế đúng một file stub `*_ce.c`. Danh sách cặp thay thế khai báo
@@ -43,7 +50,13 @@ Thư mục `tools/ext-lab/` chứa công cụ test, chạy được mà không c
   - Mỗi node dùng một nhóm port riêng.
   - Có thể chạy 2 cluster song song (`-c 0`, `-c 1`) để test XDR.
 - `asinfo.py`: client info protocol tối giản.
+- `asclient.py`: client cho security protocol (login, quản trị user/role, info khi đã
+  đăng nhập).
 - `p0_smoke.sh <asd-ce> <asd-ext>`: kiểm tra cổng chặn config và việc lập cluster.
+- `p1a_auth_test.py <asd-ext>`: kiểm tra protocol security, RBAC và việc dữ liệu còn
+  nguyên sau restart.
+- `p1a_data_test.sh <asd-ext> <client.jar>`: kiểm tra RBAC khi đọc, ghi, scan và batch
+  bằng Java client chính thức.
 
 Cả hai biến thể đều ghi binary ra cùng một đường dẫn `target/.../bin/asd`, nên phải copy
 mỗi binary ra chỗ khác sau khi build, rồi mới chạy `p0_smoke.sh`.

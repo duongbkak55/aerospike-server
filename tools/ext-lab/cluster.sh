@@ -13,7 +13,8 @@
 # XDR tests. 'extra.conf' is appended verbatim at top level (e.g. a security
 # or xdr context).
 #
-# Files go under $EXT_LAB_DIR (default: <repo>/run/ext-lab).
+# Files go under $EXT_LAB_DIR (default: <repo>/run/ext-lab). With security
+# enabled, set EXT_LAB_USER / EXT_LAB_PASSWORD for 'wait'.
 
 set -euo pipefail
 
@@ -82,6 +83,7 @@ mod-lua {
 network {
 	service {
 		address 127.0.0.1
+		access-address 127.0.0.1
 		port $port
 	}
 
@@ -153,9 +155,16 @@ wait_cluster() {
 	local deadline=$((SECONDS + timeout_s)) size
 
 	while ((SECONDS < deadline)); do
-		size="$("$SCRIPT_DIR/asinfo.py" -p "$(base_port 0)" \
-			statistics 2>/dev/null | tr ';' '\n' |
-			sed -n 's/^cluster_size=//p')" || true
+		if [[ -n "${EXT_LAB_USER:-}" ]]; then
+			size="$("$SCRIPT_DIR/asclient.py" -p "$(base_port 0)" \
+				-U "$EXT_LAB_USER" -P "${EXT_LAB_PASSWORD:-}" info statistics \
+				2>/dev/null | tr ';\t' '\n\n' |
+				sed -n 's/^cluster_size=//p')" || true
+		else
+			size="$("$SCRIPT_DIR/asinfo.py" -p "$(base_port 0)" \
+				statistics 2>/dev/null | tr ';' '\n' |
+				sed -n 's/^cluster_size=//p')" || true
+		fi
 
 		if [[ "$size" == "$nodes" ]]; then
 			echo "cluster $cluster: size $size"
@@ -174,7 +183,7 @@ start) start ;;
 stop) stop ;;
 wait) wait_cluster ;;
 *)
-	sed -n '3,15p' "$0"
+	sed -n '3,17p' "$0"
 	exit 2
 	;;
 esac
